@@ -1,4 +1,5 @@
 #include "renderer_ps2.h"
+#include "ctr_texture_pack.h"
 #include "ctr_texture_source.h"
 
 #include <dma.h>
@@ -11,39 +12,54 @@
 #include <packet2_utils.h>
 #include <tamtypes.h>
 
-#define CTRPS2_DEBUG_TEXTURE_WIDTH   64
-#define CTRPS2_DEBUG_TEXTURE_HEIGHT  64
-#define CTRPS2_DEBUG_TEXTURE_PIXELS  (CTRPS2_DEBUG_TEXTURE_WIDTH * CTRPS2_DEBUG_TEXTURE_HEIGHT)
+#define CTRPS2_DEBUG_TEXTURE_WIDTH        64
+#define CTRPS2_DEBUG_TEXTURE_HEIGHT       64
+#define CTRPS2_DEBUG_TEXTURE_PIXELS       (CTRPS2_DEBUG_TEXTURE_WIDTH * CTRPS2_DEBUG_TEXTURE_HEIGHT)
+#define CTRPS2_DEBUG_TEXTURE_4BIT_BYTES   (CTRPS2_DEBUG_TEXTURE_PIXELS / 2)
+#define CTRPS2_DEBUG_CLUT_ENTRIES         16
+#define CTRPS2_DEBUG_CLUT_BUFFER_WIDTH    64
 
 static framebuffer_t s_frame;
 static zbuffer_t s_zbuffer;
 static texbuffer_t s_debugTexture;
-static u32 s_debugTexturePixels[CTRPS2_DEBUG_TEXTURE_PIXELS]
+static u32 s_debugClutAddress;
+
+static u8 s_debugTextureIndices[CTRPS2_DEBUG_TEXTURE_4BIT_BYTES]
+    __attribute__((aligned(64)));
+static u32 s_debugTextureClut[CTRPS2_DEBUG_CLUT_ENTRIES]
     __attribute__((aligned(64)));
 
 static int CTRPS2_BuildDebugTexture(void)
 {
     struct CTRPS2SourceTextureLayout source_layout;
+    u32 width;
+    u32 height;
 
-    /*
-     * M3c changes the producer, not the GS consumer:
-     *
-     * synthetic retail 4-bit page + CLUT in a 1024x512 u16 source mirror
-     *   -> current TextureLayout addressing rules
-     *   -> one init-time RGBA32 correctness decode
-     *   -> the already hardware-proven resident GS texture path.
-     *
-     * The RGBA32 expansion is deliberately transitional. Once real CTR VRM
-     * data is connected, indexed source assets should be packed offline into
-     * PSMT4/PSMT8 + GS-ready CLUT metadata where that wins residency/page cost.
-     */
     if (!CTRPS2_SourceTextureSelfTest())
         return 0;
 
-    return CTRPS2_SourceTextureBuildDiagnostic4Bit(
-        s_debugTexturePixels,
-        CTRPS2_DEBUG_TEXTURE_PIXELS,
-        &source_layout);
+    /*
+     * M3d final-consumer test:
+     * retail 4-bit TextureLayout + PS1 source VRAM
+     *   -> packed row-major 4-bit indices
+     *   -> 16-entry GS RGBA32 CLUT
+     *   -> PSMT4 resident texture.
+     *
+     * The packer internally compares every texel against the M3c RGBA oracle,
+     * so this path changes representation without changing source semantics.
+     */
+    if (!CTRPS2_TexturePackBuildDiagnosticPSMT4(
+            s_debugTextureIndices,
+            sizeof(s_debugTextureIndices),
+            s_debugTextureClut,
+            CTRPS2_DEBUG_CLUT_ENTRIES,
+            &width,
+            &height,
+            &source_layout))
+        return 0;
+
+    return (width == CTRPS2_DEBUG_TEXTURE_WIDTH &&
+            height == CTRPS2_DEBUG_TEXTURE_HEIGHT);
 }
 
 static int CTRPS2_UploadDebugTexture(void)
@@ -51,23 +67,39 @@ static int CTRPS2_UploadDebugTexture(void)
     packet2_t *packet;
     qword_t *q;
 
-    packet = packet2_create(32, P2_TYPE_NORMAL, P2_MODE_CHAIN, 0);
+    packet = packet2_create(48, P2_TYPE_NORMAL, P2_MODE_CHAIN, 0);
     if (packet == NULL)
         return 0;
 
     q = packet->next;
+
+    /* 4096 texels = 2048 bytes instead of the M3c 16384-byte RGBA oracle. */
     q = draw_texture_transfer(
         q,
-        s_debugTexturePixels,
+        s_debugTextureIndices,
         CTRPS2_DEBUG_TEXTURE_WIDTH,
         CTRPS2_DEBUG_TEXTURE_HEIGHT,
-        GS_PSM_32,
+        GS_PSM_4,
         s_debugTexture.address,
         s_debugTexture.width);
+
+    /*
+     * CPSM32 CLUT uses a 64-pixel destination buffer width because BITBLTBUF
+     * DBW is expressed in 64-pixel units. TRXREG still transfers only 16x1.
+     */
+    q = draw_texture_transfer(
+        q,
+        s_debugTextureClut,
+        CTRPS2_DEBUG_CLUT_ENTRIES,
+        1,
+        GS_PSM_32,
+        s_debugClutAddress,
+        CTRPS2_DEBUG_CLUT_BUFFER_WIDTH);
+
     q = draw_texture_flush(q);
     packet2_update(packet, q);
 
-    /* draw_texture_transfer uses REF tags for the pixel payload. */
+    /* Both image transfers contain REF tags. Keep broad correctness flush. */
     dma_channel_send_packet2(packet, DMA_CHANNEL_GIF, 1);
     dma_channel_wait(DMA_CHANNEL_GIF, 0);
     packet2_free(packet);
@@ -91,11 +123,11 @@ static int CTRPS2_ConfigureDebugTextureState(void)
     s_debugTexture.info.components = TEXTURE_COMPONENTS_RGBA;
     s_debugTexture.info.function = TEXTURE_FUNCTION_DECAL;
 
-    clut.address = 0;
-    clut.psm = 0;
+    clut.address = s_debugClutAddress;
+    clut.psm = GS_PSM_32;
     clut.storage_mode = CLUT_STORAGE_MODE1;
     clut.start = 0;
-    clut.load_method = CLUT_NO_LOAD;
+    clut.load_method = CLUT_LOAD;
 
     lod.calculation = LOD_USE_K;
     lod.max_level = 0;
@@ -133,6 +165,7 @@ static int CTRPS2_InitGs(void)
     int frame_address;
     int z_address;
     int texture_address;
+    int clut_address;
 
     graph_vram_clear();
 
@@ -151,8 +184,7 @@ static int CTRPS2_InitGs(void)
 
     /*
      * M3 correctness prototype: keep Z storage allocated but accept every
-     * fragment. Depth ordering becomes meaningful only once real track camera
-     * and non-coplanar level geometry replace the fixture.
+     * fragment. Real track depth testing is restored with camera/track M4.
      */
     s_zbuffer.enable = DRAW_ENABLE;
     s_zbuffer.method = ZTEST_METHOD_ALLPASS;
@@ -168,15 +200,25 @@ static int CTRPS2_InitGs(void)
     s_zbuffer.address = (u32)z_address;
 
     s_debugTexture.width = CTRPS2_DEBUG_TEXTURE_WIDTH;
-    s_debugTexture.psm = GS_PSM_32;
+    s_debugTexture.psm = GS_PSM_4;
     texture_address = graph_vram_allocate(
         CTRPS2_DEBUG_TEXTURE_WIDTH,
         CTRPS2_DEBUG_TEXTURE_HEIGHT,
-        GS_PSM_32,
+        GS_PSM_4,
         GRAPH_ALIGN_BLOCK);
     if (texture_address < 0)
         return 0;
     s_debugTexture.address = (u32)texture_address;
+
+    /* One block is enough storage for a 16-entry CPSM32 palette. */
+    clut_address = graph_vram_allocate(
+        CTRPS2_DEBUG_CLUT_BUFFER_WIDTH,
+        1,
+        GS_PSM_32,
+        GRAPH_ALIGN_BLOCK);
+    if (clut_address < 0)
+        return 0;
+    s_debugClutAddress = (u32)clut_address;
 
     if (graph_initialize(
             s_frame.address,
