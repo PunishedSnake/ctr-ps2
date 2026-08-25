@@ -15,19 +15,21 @@
 
 #define CTRPS2_GEOMETRY_PROGRAM_ADDR       64
 #define CTRPS2_GEOMETRY_HEADER_QWORDS      7
-#define CTRPS2_GEOMETRY_VIF_QWORDS         64
+#define CTRPS2_GEOMETRY_VIF_QWORDS         80
 #define CTRPS2_GEOMETRY_POSITION_DEST_QW   7
 #define CTRPS2_GEOMETRY_OUTPUT_DEST_QW     64
 
 /*
- * Input positions occupy TOP+7 upward and output starts at TOP+64. Keeping the
- * source span below the output base guarantees that the current single-pass VU
- * loop cannot overwrite positions it has not consumed yet.
+ * Each source vertex expands to one position qword plus one color qword in VU1
+ * memory. Output still begins at TOP+64, therefore the correctness-first input
+ * limit is floor((64-7)/2) = 28 vertices. The M2 QuadBlock strip uses 22.
  */
 #define CTRPS2_GEOMETRY_MAX_VERTICES \
-    (CTRPS2_GEOMETRY_OUTPUT_DEST_QW - CTRPS2_GEOMETRY_POSITION_DEST_QW)
+    ((CTRPS2_GEOMETRY_OUTPUT_DEST_QW - CTRPS2_GEOMETRY_POSITION_DEST_QW) / 2u)
 #define CTRPS2_GEOMETRY_MAX_POSITION_QWORDS \
     ((CTRPS2_GEOMETRY_MAX_VERTICES * 3u * sizeof(s16) + 15u) / 16u)
+#define CTRPS2_GEOMETRY_MAX_COLOR_QWORDS \
+    ((CTRPS2_GEOMETRY_MAX_VERTICES * 4u * sizeof(u8) + 15u) / 16u)
 
 extern u32 CTRPS2_VU1_GeometryStart __attribute__((section(".vudata")));
 extern u32 CTRPS2_VU1_GeometryEnd __attribute__((section(".vudata")));
@@ -35,15 +37,15 @@ extern u32 CTRPS2_VU1_GeometryEnd __attribute__((section(".vudata")));
 /*
  * Producer: benchmark/bridge input in RDRAM.
  * Consumer: VIF1 -> VU1.
- * Representation: signed V3-16, 6 bytes/vertex.
+ * Position representation: signed V3-16, 6 bytes/vertex.
+ * Color representation: unsigned RGBA8, 4 bytes/vertex.
  *
- * The current VU program uses ITOF4. Synthetic M1 data therefore behaves as
- * 12.4 fixed point. CTR level coordinates can remain unmodified s16 values as
- * long as the eventual camera/object matrix carries the corresponding x16
- * scale. That avoids a per-vertex EE conversion while preserving the current
- * microprogram contract.
+ * VIF1 expands both streams to one qword per vertex. The current VU program
+ * uses ITOF4 only for positions; color lanes remain integer GS channel values.
  */
 static qword_t s_packedPositions[CTRPS2_GEOMETRY_MAX_POSITION_QWORDS]
+    __attribute__((aligned(64)));
+static qword_t s_packedColors[CTRPS2_GEOMETRY_MAX_COLOR_QWORDS]
     __attribute__((aligned(64)));
 
 /* Header is persistent and copied by VIF into the active TOPS buffer. */
@@ -61,6 +63,7 @@ static const float s_objectToScreen[16] __attribute__((aligned(64))) = {
 static packet2_t *s_geometryVifPacket;
 static u32 s_geometryVertexCount;
 static u32 s_geometryPositionQwords;
+static u32 s_geometryColorQwords;
 static int s_geometrySubmitted;
 static int s_geometryInitialized;
 
@@ -169,7 +172,7 @@ static void CTRPS2_BuildGeometryHeader(int primitive)
         3);
     s_geometryHeader[2].dw[1] = DRAW_STQ2_REGLIST;
 
-    /* REGLIST-friendly RGBA representation used by the VU1 path. */
+    /* Retained as a stable header slot; per-vertex RGBA now comes after positions. */
     s_geometryHeader[3].sw[0] = 0x28;
     s_geometryHeader[3].sw[1] = 0x70;
     s_geometryHeader[3].sw[2] = 0x80;
@@ -226,6 +229,31 @@ static void CTRPS2_AddV3_16PositionUnpack(packet2_t *packet)
     packet2_vif_close_unpack_manual(packet, s_geometryVertexCount);
 }
 
+static void CTRPS2_AddRGBA8ColorUnpack(packet2_t *packet)
+{
+    /*
+     * Current packet2 contract: usigned=1 zero-extends each V4-8 component.
+     * The destination follows the expanded position span, one qword per vertex.
+     */
+    packet2_chain_ref(
+        packet,
+        s_packedColors,
+        s_geometryColorQwords,
+        0,
+        0,
+        0);
+    packet2_vif_stcycl(packet, 0, 0x0101, 0);
+    packet2_vif_open_unpack(
+        packet,
+        P2_UNPACK_V4_8,
+        CTRPS2_GEOMETRY_POSITION_DEST_QW + s_geometryVertexCount,
+        1,
+        0,
+        1,
+        0);
+    packet2_vif_close_unpack_manual(packet, s_geometryVertexCount);
+}
+
 static int CTRPS2_BuildGeometryVifPacket(void)
 {
     s_geometryVifPacket = packet2_create(
@@ -244,6 +272,7 @@ static int CTRPS2_BuildGeometryVifPacket(void)
         1);
 
     CTRPS2_AddV3_16PositionUnpack(s_geometryVifPacket);
+    CTRPS2_AddRGBA8ColorUnpack(s_geometryVifPacket);
 
     /*
      * CURRENT IMPLEMENTATION baseline. This helper emits FLUSH + MSCAL.
@@ -257,12 +286,16 @@ static int CTRPS2_BuildGeometryVifPacket(void)
     return 1;
 }
 
-int CTRPS2_GeometryBenchConfigureV3_16(
+static int CTRPS2_GeometryBenchConfigureInternal(
     const void *positions_v3_16,
+    const void *colors_rgba8,
     u32 vertex_count,
     int gs_primitive)
 {
+    static const u8 fallbackColor[4] = {0x28, 0x70, 0x80, 0x80};
     u32 position_bytes;
+    u32 color_bytes;
+    u32 i;
 
     if (!s_geometryInitialized)
         return 0;
@@ -274,11 +307,26 @@ int CTRPS2_GeometryBenchConfigureV3_16(
         return 0;
 
     position_bytes = vertex_count * 3u * sizeof(s16);
+    color_bytes = vertex_count * 4u * sizeof(u8);
     s_geometryPositionQwords = (position_bytes + 15u) / 16u;
+    s_geometryColorQwords = (color_bytes + 15u) / 16u;
     s_geometryVertexCount = vertex_count;
 
     memset(s_packedPositions, 0, sizeof(s_packedPositions));
+    memset(s_packedColors, 0, sizeof(s_packedColors));
     memcpy(s_packedPositions, positions_v3_16, position_bytes);
+
+    if (colors_rgba8 != NULL)
+    {
+        memcpy(s_packedColors, colors_rgba8, color_bytes);
+    }
+    else
+    {
+        u8 *dst = (u8 *)s_packedColors;
+        for (i = 0; i < vertex_count; ++i)
+            memcpy(dst + i * 4u, fallbackColor, sizeof(fallbackColor));
+    }
+
     CTRPS2_BuildGeometryHeader(gs_primitive);
 
     if (s_geometryVifPacket != NULL)
@@ -291,6 +339,34 @@ int CTRPS2_GeometryBenchConfigureV3_16(
         return 0;
 
     return 1;
+}
+
+int CTRPS2_GeometryBenchConfigureV3_16(
+    const void *positions_v3_16,
+    u32 vertex_count,
+    int gs_primitive)
+{
+    return CTRPS2_GeometryBenchConfigureInternal(
+        positions_v3_16,
+        NULL,
+        vertex_count,
+        gs_primitive);
+}
+
+int CTRPS2_GeometryBenchConfigureV3_16_RGBA8(
+    const void *positions_v3_16,
+    const void *colors_rgba8,
+    u32 vertex_count,
+    int gs_primitive)
+{
+    if (colors_rgba8 == NULL)
+        return 0;
+
+    return CTRPS2_GeometryBenchConfigureInternal(
+        positions_v3_16,
+        colors_rgba8,
+        vertex_count,
+        gs_primitive);
 }
 
 int CTRPS2_GeometryBenchInit(void)
