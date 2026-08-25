@@ -12,13 +12,35 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Native uses the NTSC-U 926 mempack window inside the retail 2 MiB address
-// space so memory regressions fail here as they would on PSX.
+// Keep retail PS1 memory pressure as the default correctness baseline, but
+// allow native builds to expose a larger arena. This is intentionally a
+// platform policy switch: the game-facing MEMPACK allocator and its lifetime
+// semantics remain unchanged.
+#ifndef CTR_NATIVE_MEMPACK_RETAIL_PRESSURE
+#define CTR_NATIVE_MEMPACK_RETAIL_PRESSURE 1
+#endif
+
+#if CTR_NATIVE_MEMPACK_RETAIL_PRESSURE
+// NTSC-U 926 retail window inside the PS1 2 MiB address space.
 #define CTR_NATIVE_MEMPACK_BUFFER_SIZE  0x200000u
 #define CTR_NATIVE_MEMPACK_START_OFFSET 0xba9f0u
 #define CTR_NATIVE_MEMPACK_SIZE         0x144e10u
+#else
+// Expanded native arena used to remove the PS1 main-RAM capacity limit while
+// preserving MEMPACK's low/high allocation, bookmark and clear semantics.
+// 8 MiB is deliberately conservative: large enough to expose capacity-bound
+// assumptions without turning the compatibility allocator into an unbounded
+// desktop heap.
+#define CTR_NATIVE_MEMPACK_BUFFER_SIZE  0x800000u
+#define CTR_NATIVE_MEMPACK_START_OFFSET 0x000000u
+#define CTR_NATIVE_MEMPACK_SIZE         CTR_NATIVE_MEMPACK_BUFFER_SIZE
+#endif
 
+#if CTR_NATIVE_MEMPACK_RETAIL_PRESSURE
 CTR_STATIC_ASSERT(CTR_NATIVE_MEMPACK_START_OFFSET + CTR_NATIVE_MEMPACK_SIZE + MEMPACK_PS1_END_GUARD_SIZE == CTR_NATIVE_MEMPACK_BUFFER_SIZE);
+#else
+CTR_STATIC_ASSERT(CTR_NATIVE_MEMPACK_START_OFFSET + CTR_NATIVE_MEMPACK_SIZE == CTR_NATIVE_MEMPACK_BUFFER_SIZE);
+#endif
 
 union NativeScratchpadStorage
 {
@@ -58,6 +80,7 @@ const struct PlatformMempackArena *Platform_InitMempackArena(void)
 	NativeCheckpoint_OnMempackArenaReset();
 #endif
 
+	printf("[CTR] MEMPACK pressure mode: %s\n", CTR_NATIVE_MEMPACK_RETAIL_PRESSURE ? "retail-PS1" : "expanded-native");
 	return &s_mempackArena;
 }
 
