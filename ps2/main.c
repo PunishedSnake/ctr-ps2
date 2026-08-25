@@ -22,21 +22,18 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /*
-     * Geometry init uploads the VU1 microprogram and shared matrix. It also
-     * prepares the old M1 triangle packet, but the prototype intentionally does
-     * not submit that packet anymore. M2b is now the only visible geometry draw.
-     */
+    /* Upload only the M3 geometry microprogram and shared transform matrix. */
     if (!CTRPS2_GeometryBenchInit())
         CTRPS2_FailAfterRenderer(72, 12, 12);
 
     CTRPS2_RendererClear(10, 14, 24);
 
     /*
-     * M2b: consume the current CTR QuadBlock.index[9] + LevVertex layout,
-     * gather all four ordinary high-LOD faces into one 22-vertex triangle strip,
-     * stream packed RGBA8 colors beside V3-16 positions, and render the whole
-     * block with one VIF1/VU1/XGKICK submission.
+     * M3a: preserve the real-hardware validated 22-vertex QuadBlock strip, add
+     * packed UV through VIF1/VU1, and sample one resident asymmetric 64x64 GS
+     * texture on each of the four ordinary high-LOD faces. This proves the PS2
+     * texture transport/state/attribute path before retail CTR texture conversion
+     * and uv_rotation semantics are allowed onto the critical path.
      */
     if (!CTRPS2_LevelBridgeBenchRun())
         CTRPS2_FailAfterRenderer(72, 12, 72);
