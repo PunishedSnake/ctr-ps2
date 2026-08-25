@@ -16,8 +16,6 @@
 #define CTRPS2_VU1_DB_OFFSET  496
 
 int CTRPS2_RendererInit(void);
-void CTRPS2_RendererSubmitBootstrap(void);
-void CTRPS2_RendererWaitForBootstrap(void);
 void CTRPS2_RendererClear(u8 r, u8 g, u8 b);
 void CTRPS2_RendererPresent(void);
 
