@@ -1,0 +1,24 @@
+; CTR PS2 VU1 bootstrap
+;
+; Input ownership:
+;   VIF1 UNPACK writes a ready-to-consume GIF packet at current TOP.
+; Output ownership:
+;   VU1 hands that packet directly to GIF/GS through XGKICK.
+;
+; This intentionally performs no geometry transformation yet. Its purpose is
+; to validate the native DMAC -> VIF1 -> VU1 -> XGKICK -> GIF -> GS transport
+; before the CTR packed-geometry format and transform kernel are introduced.
+
+        .vu
+        .align 4
+        .global CTRPS2_VU1_BootStart
+        .global CTRPS2_VU1_BootEnd
+
+CTRPS2_VU1_BootStart:
+        NOP                             xtop        VI01
+        NOP                             xgkick      VI01
+        NOP[E]                          NOP
+        NOP                             NOP
+
+        .align 4
+CTRPS2_VU1_BootEnd:
