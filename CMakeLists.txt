@@ -3,6 +3,7 @@ project(CTR-Native C)
 include(CheckCCompilerFlag)
 
 set(CTR_NATIVE_VERSION "0.1.0-beta.7.1")
+option(CTR_NATIVE_MEMPACK_RETAIL_PRESSURE "Keep the PS1 retail MEMPACK capacity in native builds" ON)
 
 if(NOT CMAKE_SIZEOF_VOID_P EQUAL 4)
     message(FATAL_ERROR
@@ -96,6 +97,7 @@ target_compile_definitions(ctr_native PRIVATE
     CTR_INTERNAL
     CTR_NATIVE_VERSION=\"${CTR_NATIVE_VERSION}\"
     CTR_NATIVE_BUILD_ID=\"${CTR_NATIVE_BUILD_ID}\"
+    CTR_NATIVE_MEMPACK_RETAIL_PRESSURE=$<IF:$<BOOL:${CTR_NATIVE_MEMPACK_RETAIL_PRESSURE}>,1,0>
 )
 if(CTR_NATIVE_MSVC_FRONTEND)
     target_compile_options(ctr_native PRIVATE
