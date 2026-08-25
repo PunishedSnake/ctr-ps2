@@ -303,6 +303,37 @@ void CTRPS2_RendererWaitForBootstrap(void)
     draw_wait_finish();
 }
 
+void CTRPS2_RendererClear(u8 r, u8 g, u8 b)
+{
+    packet2_t *clear;
+    qword_t *q;
+
+    clear = packet2_create(32, P2_TYPE_NORMAL, P2_MODE_NORMAL, 0);
+    if (clear == NULL)
+        return;
+
+    q = clear->next;
+    q = draw_disable_tests(q, 0, &s_zbuffer);
+    q = draw_clear(
+        q,
+        0,
+        CTRPS2_GS_ORIGIN_X,
+        CTRPS2_GS_ORIGIN_Y,
+        CTRPS2_FRAME_WIDTH,
+        CTRPS2_FRAME_HEIGHT,
+        r,
+        g,
+        b);
+    q = draw_enable_tests(q, 0, &s_zbuffer);
+    q = draw_finish(q);
+    packet2_update(clear, q);
+
+    dma_channel_send_packet2(clear, DMA_CHANNEL_GIF, 0);
+    dma_channel_wait(DMA_CHANNEL_GIF, 0);
+    draw_wait_finish();
+    packet2_free(clear);
+}
+
 void CTRPS2_RendererPresent(void)
 {
     graph_wait_vsync();
