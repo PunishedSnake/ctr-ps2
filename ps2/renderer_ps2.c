@@ -1,4 +1,5 @@
 #include "renderer_ps2.h"
+#include "ctr_texture_source.h"
 
 #include <dma.h>
 #include <draw.h>
@@ -20,98 +21,29 @@ static texbuffer_t s_debugTexture;
 static u32 s_debugTexturePixels[CTRPS2_DEBUG_TEXTURE_PIXELS]
     __attribute__((aligned(64)));
 
-static u32 CTRPS2_PackRGBA32(u8 r, u8 g, u8 b, u8 a)
+static int CTRPS2_BuildDebugTexture(void)
 {
-    return ((u32)r) |
-           ((u32)g << 8) |
-           ((u32)b << 16) |
-           ((u32)a << 24);
-}
-
-static void CTRPS2_BuildDebugTexture(void)
-{
-    int x;
-    int y;
+    struct CTRPS2SourceTextureLayout source_layout;
 
     /*
-     * M3a orientation fixture. Four asymmetric quadrants, checker modulation,
-     * white outer border and two differently colored diagonals make rotations,
-     * mirroring and face-to-face UV discontinuities obvious on real hardware.
-     * This is generated once at startup; it is not a shipping asset path.
+     * M3c changes the producer, not the GS consumer:
+     *
+     * synthetic retail 4-bit page + CLUT in a 1024x512 u16 source mirror
+     *   -> current TextureLayout addressing rules
+     *   -> one init-time RGBA32 correctness decode
+     *   -> the already hardware-proven resident GS texture path.
+     *
+     * The RGBA32 expansion is deliberately transitional. Once real CTR VRM
+     * data is connected, indexed source assets should be packed offline into
+     * PSMT4/PSMT8 + GS-ready CLUT metadata where that wins residency/page cost.
      */
-    for (y = 0; y < CTRPS2_DEBUG_TEXTURE_HEIGHT; ++y)
-    {
-        for (x = 0; x < CTRPS2_DEBUG_TEXTURE_WIDTH; ++x)
-        {
-            u8 r;
-            u8 g;
-            u8 b;
-            int checker = ((x >> 3) ^ (y >> 3)) & 1;
+    if (!CTRPS2_SourceTextureSelfTest())
+        return 0;
 
-            if (y < (CTRPS2_DEBUG_TEXTURE_HEIGHT / 2))
-            {
-                if (x < (CTRPS2_DEBUG_TEXTURE_WIDTH / 2))
-                {
-                    r = 0xd0;
-                    g = 0x28;
-                    b = 0x38;
-                }
-                else
-                {
-                    r = 0x28;
-                    g = 0xc8;
-                    b = 0x48;
-                }
-            }
-            else
-            {
-                if (x < (CTRPS2_DEBUG_TEXTURE_WIDTH / 2))
-                {
-                    r = 0x28;
-                    g = 0x48;
-                    b = 0xd8;
-                }
-                else
-                {
-                    r = 0xd8;
-                    g = 0xb8;
-                    b = 0x28;
-                }
-            }
-
-            if (checker)
-            {
-                r = (u8)((r * 3u) >> 2);
-                g = (u8)((g * 3u) >> 2);
-                b = (u8)((b * 3u) >> 2);
-            }
-
-            if (x == y)
-            {
-                r = 0xff;
-                g = 0xff;
-                b = 0xff;
-            }
-            else if ((x + y) == (CTRPS2_DEBUG_TEXTURE_WIDTH - 1))
-            {
-                r = 0xff;
-                g = 0x50;
-                b = 0xff;
-            }
-
-            if (x < 2 || y < 2 ||
-                x >= (CTRPS2_DEBUG_TEXTURE_WIDTH - 2) ||
-                y >= (CTRPS2_DEBUG_TEXTURE_HEIGHT - 2))
-            {
-                r = 0xf0;
-                g = 0xf0;
-                b = 0xf0;
-            }
-
-            s_debugTexturePixels[y * CTRPS2_DEBUG_TEXTURE_WIDTH + x] =
-                CTRPS2_PackRGBA32(r, g, b, 0x80);
-        }
-    }
+    return CTRPS2_SourceTextureBuildDiagnostic4Bit(
+        s_debugTexturePixels,
+        CTRPS2_DEBUG_TEXTURE_PIXELS,
+        &source_layout);
 }
 
 static int CTRPS2_UploadDebugTexture(void)
@@ -314,7 +246,8 @@ int CTRPS2_RendererInit(void)
     if (!CTRPS2_InitGs())
         return 0;
 
-    CTRPS2_BuildDebugTexture();
+    if (!CTRPS2_BuildDebugTexture())
+        return 0;
     if (!CTRPS2_UploadDebugTexture())
         return 0;
     if (!CTRPS2_ConfigureDebugTextureState())
