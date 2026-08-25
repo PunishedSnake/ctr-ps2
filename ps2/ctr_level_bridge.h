@@ -9,9 +9,8 @@
 #define CTRPS2_LEVEL_FACE_POSITION_QWORDS 2
 
 /*
- * Four independent 4-vertex strips are joined by two connector vertices per
- * boundary. The duplicated boundary/first vertices generate only degenerate
- * triangles, preserving one GS triangle-strip primitive for the whole block.
+ * Four independent 4-vertex strips are joined by degenerate connectors. The
+ * established 22-vertex sequence is now real-hardware validated by M2c.
  */
 #define CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT \
     (CTRPS2_LEVEL_FACE_VERTEX_COUNT + (CTRPS2_LEVEL_HIGH_LOD_FACE_COUNT - 1) * 6)
@@ -19,19 +18,12 @@
     ((CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT * 3u * sizeof(s16) + 15u) / 16u)
 #define CTRPS2_LEVEL_QUADBLOCK_STRIP_COLOR_QWORDS \
     ((CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT * 4u * sizeof(u8) + 15u) / 16u)
+#define CTRPS2_LEVEL_QUADBLOCK_STRIP_UV_QWORDS \
+    ((CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT * 4u * sizeof(u16) + 15u) / 16u)
 
 /*
- * PS2-owned read-only views of the current ctr-native level layout.
- *
- * These are deliberately only the prefixes/fields needed by M2. They are not
- * a second authoritative definition of the full game structs. Current source:
- *   LevVertex  = SVec3 pos + flags + color_hi[4] + color_lo[4] (0x10 bytes)
- *   QuadBlock  = u16 index[9] at 0x00, flags at 0x12, draw-order words at
- *                0x14/0x18 and four mid-texture references at 0x1c..0x2b.
- *
- * Keeping the bridge narrow lets the standalone PS2 target consume the retail-
- * shaped layout without pulling the PS1/PsyQ compatibility headers into the EE
- * build. Once the full game target is PS2-neutral this adapter can disappear.
+ * PS2-owned read-only views of the current ctr-native level layout. They expose
+ * only fields needed by the bridge and are not a second full struct authority.
  */
 struct CTRPS2LevelVertexView
 {
@@ -50,11 +42,6 @@ struct CTRPS2QuadBlockRenderPrefix
     u32 texture_mid_ref[CTRPS2_LEVEL_HIGH_LOD_FACE_COUNT];
 };
 
-/*
- * Source semantics for one ordinary high-LOD 3x3-grid face. `texture_ref` is
- * deliberately still a source-layout reference, not a GS texture handle.
- * Texture conversion/residency belongs to the later asset boundary.
- */
 struct CTRPS2LevelHighLodFaceMeta
 {
     u32 texture_ref;
@@ -66,10 +53,6 @@ struct CTRPS2LevelHighLodFaceMeta
     u8 reserved[3];
 };
 
-/*
- * Expand one current CTR high-LOD 3x3-grid face to a VIF-ready V3-16 stream.
- * This runtime gather is an integration baseline, not the final asset format.
- */
 int CTRPS2_LevelBridgePackHighLodFaceV3_16(
     qword_t *dst,
     u32 dst_qwords,
@@ -79,38 +62,32 @@ int CTRPS2_LevelBridgePackHighLodFaceV3_16(
     u32 face_index);
 
 /*
- * Expand the four ordinary high-LOD faces into one GS triangle strip. Position
- * output is packed V3-16; color output is packed RGBA8 taken from color_hi with
- * prototype alpha forced to 0x80. Runtime gathering is still transitional: the
- * shipping asset pipeline should prebuild this consumer-ready representation.
+ * Expand one ordinary high-LOD QuadBlock to the current PS2 consumer streams:
+ * signed V3-16 position, RGBA8 color and deterministic V4-16 UV. M3a assigns
+ * the same diagnostic 0.5..63.5 texel rectangle to each face. Retail UV
+ * rotation is deliberately not applied until its source contract is complete.
  */
 int CTRPS2_LevelBridgePackHighLodQuadBlockStrip(
     qword_t *positions_dst,
     u32 position_dst_qwords,
     qword_t *colors_dst,
     u32 color_dst_qwords,
+    qword_t *uvs_dst,
+    u32 uv_dst_qwords,
     const struct CTRPS2QuadBlockRenderPrefix *block,
     const struct CTRPS2LevelVertexView *vertices,
     u32 vertex_count);
 
-/* Decode the ordinary high-LOD face state before PS1-specific rendering. */
 int CTRPS2_LevelBridgeGetHighLodFaceMeta(
     struct CTRPS2LevelHighLodFaceMeta *out,
     const struct CTRPS2QuadBlockRenderPrefix *block,
     u32 face_index);
 
-/*
- * Resolve retail's byte-addressed ordering side-channel from an unmodified raw
- * QuadBlock prefix. This must run before texture pointer words are rebased or
- * replaced by native/GS handles. It is intended for asset conversion, not the
- * steady-state draw loop.
- */
 int CTRPS2_LevelBridgeResolveRawRetailOrderBias(
     s8 *out_bias,
     const struct CTRPS2QuadBlockRenderPrefix *raw_block,
     u32 slot_word);
 
-/* Draw a source-layout fixture through the current VIF1/VU1 path. */
 int CTRPS2_LevelBridgeBenchRun(void);
 
 #endif
