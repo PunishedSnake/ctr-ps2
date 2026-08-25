@@ -12,12 +12,13 @@
 #include <packet2_utils.h>
 #include <tamtypes.h>
 
-#define CTRPS2_DEBUG_TEXTURE_WIDTH        64
-#define CTRPS2_DEBUG_TEXTURE_HEIGHT       64
-#define CTRPS2_DEBUG_TEXTURE_PIXELS       (CTRPS2_DEBUG_TEXTURE_WIDTH * CTRPS2_DEBUG_TEXTURE_HEIGHT)
-#define CTRPS2_DEBUG_TEXTURE_4BIT_BYTES   (CTRPS2_DEBUG_TEXTURE_PIXELS / 2)
-#define CTRPS2_DEBUG_CLUT_ENTRIES         16
-#define CTRPS2_DEBUG_CLUT_BUFFER_WIDTH    64
+#define CTRPS2_DEBUG_TEXTURE_WIDTH         64
+#define CTRPS2_DEBUG_TEXTURE_HEIGHT        64
+#define CTRPS2_DEBUG_TEXTURE_BUFFER_WIDTH  128
+#define CTRPS2_DEBUG_TEXTURE_PIXELS        (CTRPS2_DEBUG_TEXTURE_WIDTH * CTRPS2_DEBUG_TEXTURE_HEIGHT)
+#define CTRPS2_DEBUG_TEXTURE_4BIT_BYTES    (CTRPS2_DEBUG_TEXTURE_PIXELS / 2)
+#define CTRPS2_DEBUG_CLUT_ENTRIES          16
+#define CTRPS2_DEBUG_CLUT_BUFFER_WIDTH     64
 
 static framebuffer_t s_frame;
 static zbuffer_t s_zbuffer;
@@ -118,6 +119,7 @@ static int CTRPS2_ConfigureDebugTextureState(void)
     if (packet == NULL)
         return 0;
 
+    /* TBW follows the 128-wide PSMT4 storage; TW/TH stay logical 64x64. */
     s_debugTexture.info.width = draw_log2(CTRPS2_DEBUG_TEXTURE_WIDTH);
     s_debugTexture.info.height = draw_log2(CTRPS2_DEBUG_TEXTURE_HEIGHT);
     s_debugTexture.info.components = TEXTURE_COMPONENTS_RGBA;
@@ -199,10 +201,15 @@ static int CTRPS2_InitGs(void)
         return 0;
     s_zbuffer.address = (u32)z_address;
 
-    s_debugTexture.width = CTRPS2_DEBUG_TEXTURE_WIDTH;
+    /*
+     * Current graph_vram_size() rounds PSMT4 storage wider than 16 texels to a
+     * 128-texel physical row/page granularity. Match that in TBW explicitly;
+     * logical texture dimensions remain 64x64 through TEX0 TW/TH.
+     */
+    s_debugTexture.width = CTRPS2_DEBUG_TEXTURE_BUFFER_WIDTH;
     s_debugTexture.psm = GS_PSM_4;
     texture_address = graph_vram_allocate(
-        CTRPS2_DEBUG_TEXTURE_WIDTH,
+        CTRPS2_DEBUG_TEXTURE_BUFFER_WIDTH,
         CTRPS2_DEBUG_TEXTURE_HEIGHT,
         GS_PSM_4,
         GRAPH_ALIGN_BLOCK);
