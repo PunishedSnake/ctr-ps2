@@ -1,3 +1,4 @@
+#include "ctr_level_bridge.h"
 #include "geometry_bench.h"
 #include "renderer_ps2.h"
 
@@ -30,6 +31,18 @@ int main(int argc, char *argv[])
 
     CTRPS2_GeometryBenchSubmit();
     CTRPS2_GeometryBenchWait();
+
+    /*
+     * M2a bridge baseline: consume the current CTR QuadBlock.index[9] +
+     * LevVertex layout and draw its four high-LOD grid faces through M1.
+     * This deliberately keeps four independent, fenced batches for the first
+     * correctness reproduction. The next optimization is to batch them.
+     */
+    if (!CTRPS2_LevelBridgeBenchRun())
+    {
+        SleepThread();
+        return 3;
+    }
 
     for (;;)
         CTRPS2_RendererPresent();
