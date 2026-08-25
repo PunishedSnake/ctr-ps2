@@ -13,19 +13,6 @@
 #include <packet2_vif.h>
 #include <tamtypes.h>
 
-#define CTRPS2_FRAME_WIDTH        640
-#define CTRPS2_FRAME_HEIGHT       448
-#define CTRPS2_GS_ORIGIN_X        (2048 - (CTRPS2_FRAME_WIDTH / 2))
-#define CTRPS2_GS_ORIGIN_Y        (2048 - (CTRPS2_FRAME_HEIGHT / 2))
-
-/*
- * VU1 has 1024 qwords of data memory. The first renderer contract reserves
- * two equal VIF1 TOP/TOPS regions. This is deliberately larger than the tiny
- * bootstrap packet so the same ownership model can survive the next step,
- * where each region holds a real CTR geometry batch plus VU-generated output.
- */
-#define CTRPS2_VU1_DB_BASE        0
-#define CTRPS2_VU1_DB_OFFSET      512
 #define CTRPS2_VIF_PACKET_QWORDS  32
 #define CTRPS2_GIF_PACKET_QWORDS  16
 
@@ -128,6 +115,26 @@ static int CTRPS2_InitGs(void)
     return 1;
 }
 
+static int CTRPS2_ConfigureVu1Buffers(void)
+{
+    packet2_t *packet;
+
+    packet = packet2_create(4, P2_TYPE_NORMAL, P2_MODE_CHAIN, 1);
+    if (packet == NULL)
+        return 0;
+
+    packet2_utils_vu_add_double_buffer(
+        packet,
+        CTRPS2_VU1_DB_BASE,
+        CTRPS2_VU1_DB_OFFSET);
+    packet2_utils_vu_add_end_tag(packet);
+
+    dma_channel_send_packet2(packet, DMA_CHANNEL_VIF1, 1);
+    dma_channel_wait(DMA_CHANNEL_VIF1, 0);
+    packet2_free(packet);
+    return 1;
+}
+
 static int CTRPS2_UploadVu1Program(void)
 {
     packet2_t *upload;
@@ -186,7 +193,6 @@ static int CTRPS2_BuildBootstrapGifPacket(void)
     vertices[1] = CTRPS2_MakeXYZ(128, 360, 0x10000000u);
     vertices[2] = CTRPS2_MakeXYZ(512, 360, 0x10000000u);
 
-    /* State packet, EOP=0. */
     packet2_add_2x_s64(
         s_bootGifPacket,
         (s64)GIF_SET_TAG(1, 0, 0, 0, GIF_FLG_PACKED, 1),
@@ -205,7 +211,6 @@ static int CTRPS2_BuildBootstrapGifPacket(void)
             prim.colorfix),
         (s64)GS_REG_PRIM);
 
-    /* Geometry packet, EOP=0 so FINISH can remain in the same XGKICK stream. */
     packet2_add_2x_s64(
         s_bootGifPacket,
         (s64)VU_GS_GIFTAG(3, 0, 0, 0, GIF_FLG_REGLIST, 2),
@@ -219,7 +224,6 @@ static int CTRPS2_BuildBootstrapGifPacket(void)
         packet2_update(s_bootGifPacket, vertex + 1);
     }
 
-    /* FINISH packet owns EOP=1. CPU can therefore wait on a real GS fence. */
     packet2_add_2x_s64(
         s_bootGifPacket,
         (s64)GIF_SET_TAG(1, 1, 0, 0, GIF_FLG_PACKED, 1),
@@ -233,11 +237,6 @@ static int CTRPS2_BuildBootstrapVifPacket(void)
 {
     u32 gifQwords = packet2_get_qw_count(s_bootGifPacket);
 
-    /*
-     * TTE=1 is part of this packet contract. packet2's VIF chain helpers place
-     * their two VIF codes in the DMA tag transfer payload. With TTE disabled,
-     * those words would instead be interpreted as the next DMA tag.
-     */
     s_bootVifPacket = packet2_create(
         CTRPS2_VIF_PACKET_QWORDS,
         P2_TYPE_NORMAL,
@@ -246,11 +245,7 @@ static int CTRPS2_BuildBootstrapVifPacket(void)
     if (s_bootVifPacket == NULL)
         return 0;
 
-    packet2_utils_vu_add_double_buffer(
-        s_bootVifPacket,
-        CTRPS2_VU1_DB_BASE,
-        CTRPS2_VU1_DB_OFFSET);
-
+    /* BASE/OFFSET is renderer state and is configured once during init. */
     packet2_utils_vu_add_unpack_data(
         s_bootVifPacket,
         0,
@@ -260,9 +255,8 @@ static int CTRPS2_BuildBootstrapVifPacket(void)
 
     /*
      * CURRENT IMPLEMENTATION baseline: PS2SDK's helper emits FLUSH + MSCAL.
-     * The broad FLUSH is intentionally retained for the first hardware proof.
-     * It is not treated as a permanent renderer barrier and will be removed or
-     * narrowed only after VIF/VU/GIF ownership is validated on real hardware.
+     * This remains intentionally conservative until the transport proof is
+     * reproduced on real hardware.
      */
     packet2_utils_vu_add_start_program(s_bootVifPacket, 0);
     packet2_utils_vu_add_end_tag(s_bootVifPacket);
@@ -277,6 +271,8 @@ int CTRPS2_RendererInit(void)
     dma_channel_fast_waits(DMA_CHANNEL_VIF1);
 
     if (!CTRPS2_InitGs())
+        return 0;
+    if (!CTRPS2_ConfigureVu1Buffers())
         return 0;
     if (!CTRPS2_UploadVu1Program())
         return 0;
@@ -294,11 +290,6 @@ void CTRPS2_RendererSubmitBootstrap(void)
     if (s_bootSubmitted)
         return;
 
-    /*
-     * Source-chain REF points at the persistent GIF payload. flush_cache=1 is
-     * required by current PS2SDK because source-chained data is not covered by
-     * the normal chain cache sync alone.
-     */
     dma_channel_send_packet2(s_bootVifPacket, DMA_CHANNEL_VIF1, 1);
     s_bootSubmitted = 1;
 }
