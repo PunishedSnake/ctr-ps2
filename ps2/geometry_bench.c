@@ -13,24 +13,37 @@
 #include <string.h>
 #include <tamtypes.h>
 
-#define CTRPS2_GEOMETRY_PROGRAM_ADDR      64
-#define CTRPS2_GEOMETRY_VERTEX_COUNT      3
-#define CTRPS2_GEOMETRY_HEADER_QWORDS     7
-#define CTRPS2_GEOMETRY_POSITION_QWORDS   2
-#define CTRPS2_GEOMETRY_VIF_QWORDS        48
-#define CTRPS2_GEOMETRY_POSITION_DEST_QW  7
+#define CTRPS2_GEOMETRY_PROGRAM_ADDR       64
+#define CTRPS2_GEOMETRY_HEADER_QWORDS      7
+#define CTRPS2_GEOMETRY_VIF_QWORDS         64
+#define CTRPS2_GEOMETRY_POSITION_DEST_QW   7
+#define CTRPS2_GEOMETRY_OUTPUT_DEST_QW     64
+
+/*
+ * Input positions occupy TOP+7 upward and output starts at TOP+64. Keeping the
+ * source span below the output base guarantees that the current single-pass VU
+ * loop cannot overwrite positions it has not consumed yet.
+ */
+#define CTRPS2_GEOMETRY_MAX_VERTICES \
+    (CTRPS2_GEOMETRY_OUTPUT_DEST_QW - CTRPS2_GEOMETRY_POSITION_DEST_QW)
+#define CTRPS2_GEOMETRY_MAX_POSITION_QWORDS \
+    ((CTRPS2_GEOMETRY_MAX_VERTICES * 3u * sizeof(s16) + 15u) / 16u)
 
 extern u32 CTRPS2_VU1_GeometryStart __attribute__((section(".vudata")));
 extern u32 CTRPS2_VU1_GeometryEnd __attribute__((section(".vudata")));
 
 /*
- * Producer: offline-asset-shaped test data in RDRAM.
+ * Producer: benchmark/bridge input in RDRAM.
  * Consumer: VIF1 -> VU1.
- * Representation: signed V3-16, 12.4 fixed point, 6 bytes/vertex.
- * Alignment: cache-line aligned source object; VIF consumes only the first 18
- * bytes and the DMA REF carries two qwords so the final 14 bytes are padding.
+ * Representation: signed V3-16, 6 bytes/vertex.
+ *
+ * The current VU program uses ITOF4. Synthetic M1 data therefore behaves as
+ * 12.4 fixed point. CTR level coordinates can remain unmodified s16 values as
+ * long as the eventual camera/object matrix carries the corresponding x16
+ * scale. That avoids a per-vertex EE conversion while preserving the current
+ * microprogram contract.
  */
-static qword_t s_packedPositions[CTRPS2_GEOMETRY_POSITION_QWORDS]
+static qword_t s_packedPositions[CTRPS2_GEOMETRY_MAX_POSITION_QWORDS]
     __attribute__((aligned(64)));
 
 /* Header is persistent and copied by VIF into the active TOPS buffer. */
@@ -46,7 +59,10 @@ static const float s_objectToScreen[16] __attribute__((aligned(64))) = {
 };
 
 static packet2_t *s_geometryVifPacket;
+static u32 s_geometryVertexCount;
+static u32 s_geometryPositionQwords;
 static int s_geometrySubmitted;
+static int s_geometryInitialized;
 
 static void CTRPS2_WriteFloat(qword_t *qword, int component, float value)
 {
@@ -108,27 +124,7 @@ static int CTRPS2_UploadGeometryMatrix(void)
     return 1;
 }
 
-static void CTRPS2_BuildPackedPositions(void)
-{
-    s16 *dst = (s16 *)s_packedPositions;
-
-    memset(s_packedPositions, 0, sizeof(s_packedPositions));
-
-    /* Signed 12.4 fixed point: [-1, +1] maps to roughly [-16, +16]. */
-    dst[0] = -8;
-    dst[1] = -8;
-    dst[2] = 0;
-
-    dst[3] = 0;
-    dst[4] = 10;
-    dst[5] = 0;
-
-    dst[6] = 8;
-    dst[7] = -8;
-    dst[8] = 0;
-}
-
-static void CTRPS2_BuildGeometryHeader(void)
+static void CTRPS2_BuildGeometryHeader(int primitive)
 {
     u64 prim;
     float zScale = ((float)0x00ffffffu) / 32.0f;
@@ -139,7 +135,7 @@ static void CTRPS2_BuildGeometryHeader(void)
     CTRPS2_WriteFloat(&s_geometryHeader[0], 0, CTRPS2_FRAME_WIDTH * 0.5f);
     CTRPS2_WriteFloat(&s_geometryHeader[0], 1, CTRPS2_FRAME_HEIGHT * 0.5f);
     CTRPS2_WriteFloat(&s_geometryHeader[0], 2, zScale);
-    s_geometryHeader[0].sw[3] = CTRPS2_GEOMETRY_VERTEX_COUNT;
+    s_geometryHeader[0].sw[3] = s_geometryVertexCount;
 
     /* Distinct screen offset lets scale and GS XYOFFSET remain independent. */
     CTRPS2_WriteFloat(
@@ -153,7 +149,7 @@ static void CTRPS2_BuildGeometryHeader(void)
     CTRPS2_WriteFloat(&s_geometryHeader[1], 2, zScale);
 
     prim = GS_SET_PRIM(
-        PRIM_TRIANGLE,
+        primitive,
         PRIM_SHADE_GOURAUD,
         DRAW_DISABLE,
         DRAW_DISABLE,
@@ -165,7 +161,7 @@ static void CTRPS2_BuildGeometryHeader(void)
 
     /* VU copies this GS-ready primitive tag to its output region. */
     s_geometryHeader[2].dw[0] = VU_GS_GIFTAG(
-        CTRPS2_GEOMETRY_VERTEX_COUNT,
+        s_geometryVertexCount,
         0,
         1,
         prim,
@@ -211,14 +207,10 @@ static void CTRPS2_AddV3_16PositionUnpack(packet2_t *packet)
     packet2_vif_stmask(packet, mask, 0);
     packet2_chain_close_tag(packet);
 
-    /*
-     * REF source is two qwords (32 bytes) while UNPACK consumes only 18 bytes
-     * for three V3-16 vertices. The remainder is explicit packet padding.
-     */
     packet2_chain_ref(
         packet,
         s_packedPositions,
-        CTRPS2_GEOMETRY_POSITION_QWORDS,
+        s_geometryPositionQwords,
         0,
         0,
         0);
@@ -231,7 +223,7 @@ static void CTRPS2_AddV3_16PositionUnpack(packet2_t *packet)
         1,
         0,
         0);
-    packet2_vif_close_unpack_manual(packet, CTRPS2_GEOMETRY_VERTEX_COUNT);
+    packet2_vif_close_unpack_manual(packet, s_geometryVertexCount);
 }
 
 static int CTRPS2_BuildGeometryVifPacket(void)
@@ -255,8 +247,8 @@ static int CTRPS2_BuildGeometryVifPacket(void)
 
     /*
      * CURRENT IMPLEMENTATION baseline. This helper emits FLUSH + MSCAL.
-     * The packed format and ownership model are the experiment here; barrier
-     * narrowing belongs to the next A/B once this exact stream is reproduced.
+     * Barrier narrowing belongs to a later A/B after real-hardware ownership
+     * and completion have been reproduced for this exact stream.
      */
     packet2_utils_vu_add_start_program(
         s_geometryVifPacket,
@@ -265,24 +257,68 @@ static int CTRPS2_BuildGeometryVifPacket(void)
     return 1;
 }
 
+int CTRPS2_GeometryBenchConfigureV3_16(
+    const void *positions_v3_16,
+    u32 vertex_count,
+    int gs_primitive)
+{
+    u32 position_bytes;
+
+    if (!s_geometryInitialized)
+        return 0;
+    if (s_geometrySubmitted)
+        return 0;
+    if (positions_v3_16 == NULL)
+        return 0;
+    if (vertex_count == 0 || vertex_count > CTRPS2_GEOMETRY_MAX_VERTICES)
+        return 0;
+
+    position_bytes = vertex_count * 3u * sizeof(s16);
+    s_geometryPositionQwords = (position_bytes + 15u) / 16u;
+    s_geometryVertexCount = vertex_count;
+
+    memset(s_packedPositions, 0, sizeof(s_packedPositions));
+    memcpy(s_packedPositions, positions_v3_16, position_bytes);
+    CTRPS2_BuildGeometryHeader(gs_primitive);
+
+    if (s_geometryVifPacket != NULL)
+    {
+        packet2_free(s_geometryVifPacket);
+        s_geometryVifPacket = NULL;
+    }
+
+    if (!CTRPS2_BuildGeometryVifPacket())
+        return 0;
+
+    return 1;
+}
+
 int CTRPS2_GeometryBenchInit(void)
 {
-    CTRPS2_BuildPackedPositions();
-    CTRPS2_BuildGeometryHeader();
+    static const s16 baselinePositions[3][3] = {
+        {-8, -8, 0},
+        { 0, 10, 0},
+        { 8, -8, 0},
+    };
 
     if (!CTRPS2_UploadGeometryProgram())
         return 0;
     if (!CTRPS2_UploadGeometryMatrix())
         return 0;
-    if (!CTRPS2_BuildGeometryVifPacket())
-        return 0;
 
     s_geometrySubmitted = 0;
-    return 1;
+    s_geometryInitialized = 1;
+
+    return CTRPS2_GeometryBenchConfigureV3_16(
+        baselinePositions,
+        3,
+        PRIM_TRIANGLE);
 }
 
 void CTRPS2_GeometryBenchSubmit(void)
 {
+    if (!s_geometryInitialized || s_geometryVifPacket == NULL)
+        return;
     if (s_geometrySubmitted)
         return;
 
@@ -298,4 +334,5 @@ void CTRPS2_GeometryBenchWait(void)
 
     dma_channel_wait(DMA_CHANNEL_VIF1, 0);
     draw_wait_finish();
+    s_geometrySubmitted = 0;
 }
