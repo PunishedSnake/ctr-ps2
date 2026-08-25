@@ -5,10 +5,6 @@
 #include <stddef.h>
 #include <string.h>
 
-/*
- * Current ctr-native 1P high-LOD grid topology. Each entry names the four
- * QuadBlock index[] slots consumed for one of the four 2x2 sub-faces.
- */
 static const u8 s_highLodFaceIndices[CTRPS2_LEVEL_HIGH_LOD_FACE_COUNT][CTRPS2_LEVEL_FACE_VERTEX_COUNT] = {
     {0, 4, 5, 6},
     {4, 1, 6, 7},
@@ -16,18 +12,32 @@ static const u8 s_highLodFaceIndices[CTRPS2_LEVEL_HIGH_LOD_FACE_COUNT][CTRPS2_LE
     {6, 7, 8, 3},
 };
 
-/*
- * One triangle strip for all four faces. Between faces we emit:
- *   previous_last, next_first, next_first
- * before the remaining three vertices of the next face. Every connector
- * triangle is therefore degenerate while the first real triangle of each face
- * starts at even strip parity.
- */
+/* Real-hardware validated M2c strip topology. */
 static const u8 s_highLodStripQuadIndices[CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT] = {
     0, 4, 5, 6,
     6, 4, 4, 1, 6, 7,
     7, 5, 5, 6, 2, 8,
     8, 6, 6, 7, 8, 3,
+};
+
+/*
+ * UV corner accompanying every vertex above. 0=TL, 1=TR, 2=BL, 3=BR.
+ * Connector duplicates keep the UV of the duplicated endpoint, so all bridge
+ * triangles remain degenerate in both position and attribute space.
+ */
+static const u8 s_highLodStripUvCorner[CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT] = {
+    0, 1, 2, 3,
+    3, 0, 0, 1, 2, 3,
+    3, 0, 0, 1, 2, 3,
+    3, 0, 0, 1, 2, 3,
+};
+
+/* GS UV is 12.4 fixed. Half-texel centers cover a 64x64 texture cleanly. */
+static const u16 s_debugFaceUv[CTRPS2_LEVEL_FACE_VERTEX_COUNT][2] = {
+    {   8,    8},
+    {1016,    8},
+    {   8, 1016},
+    {1016, 1016},
 };
 
 _Static_assert(sizeof(struct CTRPS2LevelVertexView) == 0x10, "LevVertex bridge view must remain 0x10 bytes");
@@ -40,6 +50,8 @@ _Static_assert(offsetof(struct CTRPS2QuadBlockRenderPrefix, draw_order_high) == 
 _Static_assert(offsetof(struct CTRPS2QuadBlockRenderPrefix, texture_mid_ref) == 0x1c, "QuadBlock.texture_mid bridge offset changed");
 _Static_assert(sizeof(s_highLodStripQuadIndices) == CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT,
                "QuadBlock strip topology count changed");
+_Static_assert(sizeof(s_highLodStripUvCorner) == CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT,
+               "QuadBlock strip UV topology count changed");
 
 int CTRPS2_LevelBridgePackHighLodFaceV3_16(
     qword_t *dst,
@@ -85,30 +97,39 @@ int CTRPS2_LevelBridgePackHighLodQuadBlockStrip(
     u32 position_dst_qwords,
     qword_t *colors_dst,
     u32 color_dst_qwords,
+    qword_t *uvs_dst,
+    u32 uv_dst_qwords,
     const struct CTRPS2QuadBlockRenderPrefix *block,
     const struct CTRPS2LevelVertexView *vertices,
     u32 vertex_count)
 {
     s16 *position_out;
     u8 *color_out;
+    u16 *uv_out;
     u32 i;
 
-    if (positions_dst == NULL || colors_dst == NULL || block == NULL || vertices == NULL)
+    if (positions_dst == NULL || colors_dst == NULL || uvs_dst == NULL ||
+        block == NULL || vertices == NULL)
         return 0;
     if (position_dst_qwords < CTRPS2_LEVEL_QUADBLOCK_STRIP_POSITION_QWORDS)
         return 0;
     if (color_dst_qwords < CTRPS2_LEVEL_QUADBLOCK_STRIP_COLOR_QWORDS)
         return 0;
+    if (uv_dst_qwords < CTRPS2_LEVEL_QUADBLOCK_STRIP_UV_QWORDS)
+        return 0;
 
     memset(positions_dst, 0, CTRPS2_LEVEL_QUADBLOCK_STRIP_POSITION_QWORDS * sizeof(qword_t));
     memset(colors_dst, 0, CTRPS2_LEVEL_QUADBLOCK_STRIP_COLOR_QWORDS * sizeof(qword_t));
+    memset(uvs_dst, 0, CTRPS2_LEVEL_QUADBLOCK_STRIP_UV_QWORDS * sizeof(qword_t));
     position_out = (s16 *)positions_dst;
     color_out = (u8 *)colors_dst;
+    uv_out = (u16 *)uvs_dst;
 
     for (i = 0; i < CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT; ++i)
     {
         const u32 quad_index = s_highLodStripQuadIndices[i];
         const u32 vertex_index = block->index[quad_index];
+        const u32 uv_corner = s_highLodStripUvCorner[i];
         const struct CTRPS2LevelVertexView *src;
 
         if (vertex_index >= vertex_count)
@@ -123,6 +144,11 @@ int CTRPS2_LevelBridgePackHighLodQuadBlockStrip(
         color_out[i * 4 + 1] = src->color_hi[1];
         color_out[i * 4 + 2] = src->color_hi[2];
         color_out[i * 4 + 3] = 0x80;
+
+        uv_out[i * 4 + 0] = s_debugFaceUv[uv_corner][0];
+        uv_out[i * 4 + 1] = s_debugFaceUv[uv_corner][1];
+        uv_out[i * 4 + 2] = 0;
+        uv_out[i * 4 + 3] = 0;
     }
 
     return CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT;
@@ -146,13 +172,10 @@ int CTRPS2_LevelBridgeGetHighLodFaceMeta(
      * - four packed five-bit face fields begin at bit 8;
      * - low three bits select the UV rotation and the next two bits face mode;
      * - bit 31 is the QuadBlock-wide double-sided flag;
-     * - SetGridFaceSlot(face) stores face*4, therefore the normal high-LOD
-     *   ordering lookup reads byte 0x18+face, i.e. draw_order_high[face].
+     * - normal high-LOD ordering reads draw_order_high[face].
      *
-     * Dynamic subdivision has a broader retail contract: custom slot words can
-     * make the ordering lookup read bytes from the original PSX texture-pointer
-     * words. Do not reuse this helper for those paths. Their resolved bias must
-     * be captured before pointer representation is changed.
+     * M3a deliberately does not interpret uv_rotation into corner permutations.
+     * That mapping remains a separate source-contract task for M3b.
      */
     face_shift = 8u + face_index * 5u;
     face_field = (block->draw_order_low >> face_shift) & 0x1fu;
@@ -178,7 +201,6 @@ int CTRPS2_LevelBridgeResolveRawRetailOrderBias(
     if (out_bias == NULL || raw_block == NULL)
         return 0;
 
-    /* Retail computes 0x18 + (slotWord >> 2) before a signed byte load. */
     byte_offset = 0x18u + (slot_word >> 2);
     if (byte_offset >= sizeof(*raw_block))
         return 0;
@@ -188,25 +210,19 @@ int CTRPS2_LevelBridgeResolveRawRetailOrderBias(
     return 1;
 }
 
-/*
- * Source-layout fixture for the bridge itself. The important property is not
- * the coordinates but the memory contract: nine 0x10-byte LevVertex records
- * addressed through QuadBlock.index[9], exactly like current ctr-native level
- * geometry. Retail track data is intentionally not copied into the repository.
- */
+/* Neutral vertex color makes the M3 DECAL texture itself the visible signal. */
 static const struct CTRPS2LevelVertexView s_fixtureVertices[CTRPS2_LEVEL_QUADBLOCK_VERTEX_COUNT] = {
-    {{-8, -8, 0}, 0, {0x70, 0x20, 0x20, 0x00}, {0x20, 0x20, 0x20, 0x00}},
-    {{ 8, -8, 0}, 0, {0x20, 0x70, 0x20, 0x00}, {0x20, 0x20, 0x20, 0x00}},
-    {{-8,  8, 0}, 0, {0x20, 0x30, 0x70, 0x00}, {0x20, 0x20, 0x20, 0x00}},
-    {{ 8,  8, 0}, 0, {0x70, 0x60, 0x20, 0x00}, {0x20, 0x20, 0x20, 0x00}},
-    {{ 0, -8, 0}, 0, {0x70, 0x30, 0x60, 0x00}, {0x20, 0x20, 0x20, 0x00}},
-    {{-8,  0, 0}, 0, {0x20, 0x70, 0x60, 0x00}, {0x20, 0x20, 0x20, 0x00}},
-    {{ 0,  0, 0}, 0, {0x78, 0x78, 0x78, 0x00}, {0x30, 0x30, 0x30, 0x00}},
-    {{ 8,  0, 0}, 0, {0x60, 0x40, 0x70, 0x00}, {0x20, 0x20, 0x20, 0x00}},
-    {{ 0,  8, 0}, 0, {0x40, 0x70, 0x30, 0x00}, {0x20, 0x20, 0x20, 0x00}},
+    {{-8, -8, 0}, 0, {0x80, 0x80, 0x80, 0x00}, {0x20, 0x20, 0x20, 0x00}},
+    {{ 8, -8, 0}, 0, {0x80, 0x80, 0x80, 0x00}, {0x20, 0x20, 0x20, 0x00}},
+    {{-8,  8, 0}, 0, {0x80, 0x80, 0x80, 0x00}, {0x20, 0x20, 0x20, 0x00}},
+    {{ 8,  8, 0}, 0, {0x80, 0x80, 0x80, 0x00}, {0x20, 0x20, 0x20, 0x00}},
+    {{ 0, -8, 0}, 0, {0x80, 0x80, 0x80, 0x00}, {0x20, 0x20, 0x20, 0x00}},
+    {{-8,  0, 0}, 0, {0x80, 0x80, 0x80, 0x00}, {0x20, 0x20, 0x20, 0x00}},
+    {{ 0,  0, 0}, 0, {0x80, 0x80, 0x80, 0x00}, {0x30, 0x30, 0x30, 0x00}},
+    {{ 8,  0, 0}, 0, {0x80, 0x80, 0x80, 0x00}, {0x20, 0x20, 0x20, 0x00}},
+    {{ 0,  8, 0}, 0, {0x80, 0x80, 0x80, 0x00}, {0x20, 0x20, 0x20, 0x00}},
 };
 
-/* Face fields are 5, 10, 15, 20. draw_order_high bytes are -4, 2, 7, -1. */
 static const struct CTRPS2QuadBlockRenderPrefix s_fixtureQuadBlock = {
     .index = {0, 1, 2, 3, 4, 5, 6, 7, 8},
     .quad_flags = 0,
@@ -266,6 +282,8 @@ int CTRPS2_LevelBridgeBenchRun(void)
         __attribute__((aligned(64)));
     qword_t colors[CTRPS2_LEVEL_QUADBLOCK_STRIP_COLOR_QWORDS]
         __attribute__((aligned(64)));
+    qword_t uvs[CTRPS2_LEVEL_QUADBLOCK_STRIP_UV_QWORDS]
+        __attribute__((aligned(64)));
     int count;
 
     if (!CTRPS2_LevelBridgeValidateFixtureMeta())
@@ -276,21 +294,19 @@ int CTRPS2_LevelBridgeBenchRun(void)
         CTRPS2_LEVEL_QUADBLOCK_STRIP_POSITION_QWORDS,
         colors,
         CTRPS2_LEVEL_QUADBLOCK_STRIP_COLOR_QWORDS,
+        uvs,
+        CTRPS2_LEVEL_QUADBLOCK_STRIP_UV_QWORDS,
         &s_fixtureQuadBlock,
         s_fixtureVertices,
         CTRPS2_LEVEL_QUADBLOCK_VERTEX_COUNT);
     if (count != CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT)
         return 0;
 
-    /*
-     * M2b correctness baseline: the entire ordinary high-LOD QuadBlock is now
-     * one VIF/VU/GS submission with per-vertex color. Texture/material state is
-     * deliberately still disabled until the source texture conversion boundary
-     * is implemented and validated separately.
-     */
-    if (!CTRPS2_GeometryBenchConfigureV3_16_RGBA8(
+    /* M3a: one resident texture, one textured 22-vertex VIF/VU/XGKICK batch. */
+    if (!CTRPS2_GeometryBenchConfigureV3_16_RGBA8_UV16(
             positions,
             colors,
+            uvs,
             (u32)count,
             GS_PRIM_TRIANGLE_STRIP))
         return 0;
