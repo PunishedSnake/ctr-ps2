@@ -1,0 +1,31 @@
+name: PS2 native renderer
+
+on:
+  pull_request:
+    paths:
+      - "ps2/**"
+      - ".github/workflows/ps2-native.yml"
+  push:
+    branches:
+      - "feature/ps2-native-renderer"
+    paths:
+      - "ps2/**"
+      - ".github/workflows/ps2-native.yml"
+
+jobs:
+  build-ee:
+    runs-on: ubuntu-latest
+    container:
+      image: ps2dev/ps2dev:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Toolchain versions
+        run: |
+          mips64r5900el-ps2-elf-gcc --version
+          dvp-as --version || true
+
+      - name: Build PS2 native target
+        run: make -C ps2
