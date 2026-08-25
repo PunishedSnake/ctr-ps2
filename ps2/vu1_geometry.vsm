@@ -7,17 +7,18 @@
 ;   0      scale.xyz + vertex_count.w
 ;   1      screen offset.xyz
 ;   2      primitive GIFtag
-;   3      RGBA constant
+;   3      reserved/fallback RGBA
 ;   4      STQ base constant
 ;   5      FINISH GIFtag
 ;   6      FINISH A+D payload
-;   7..    positions expanded by VIF1 from signed V3-16 to [x y z 1]
+;   7..7+N-1       positions expanded by VIF1 from signed V3-16
+;   7+N..7+2N-1    colors expanded by VIF1 from unsigned V4-8
 ;
 ; Output begins at TOP + 64 and is GS-ready REGLIST data. Positions arrive as
 ; signed 12.4 fixed-point values; VIF performs width expansion and VU1 performs
-; ITOF4 locally before transform. This is a correctness-first schedule. Stalls
-; are intentionally explicit until hardware validation and a measured scheduler
-; pass replace them.
+; ITOF4 locally before transform. Colors remain integer GS channel values.
+; This is still a correctness-first schedule. Stalls stay explicit until real
+; hardware validation and a measured scheduler pass justify changing them.
 
         .vu
         .align 4
@@ -34,7 +35,6 @@ CTRPS2_VU1_GeometryStart:
         NOP                             lq          VF05, 0(VI02)
         NOP                             lq          VF13, 1(VI02)
         NOP                             lq          VF06, 2(VI02)
-        NOP                             lq          VF08, 3(VI02)
         NOP                             lq          VF09, 4(VI02)
         NOP                             lq          VF10, 5(VI02)
         NOP                             lq          VF11, 6(VI02)
@@ -42,13 +42,16 @@ CTRPS2_VU1_GeometryStart:
         NOP                             ilw.w       VI07, 0(VI02)
         NOP                             iaddiu      VI03, VI02, 7
         NOP                             iadd        VI04, VI03, VI07
+        NOP                             iadd        VI08, VI04, VI00
         NOP                             iaddiu      VI05, VI02, 64
         NOP                             iaddiu      VI06, VI05, 0
         NOP                             sqi         VF06, (VI06++)
 
 CTRPS2_VU1_GeometryLoop:
         NOP                             lq          VF07, 0(VI03)
+        NOP                             lq          VF14, 0(VI08)
         NOP                             iaddiu      VI03, VI03, 1
+        NOP                             iaddiu      VI08, VI08, 1
         itof4.xyz     VF07, VF07        NOP
         NOP                             NOP
         NOP                             NOP
@@ -76,7 +79,7 @@ CTRPS2_VU1_GeometryLoop:
         ftoi4.xyz     VF07, VF07        NOP
 
         NOP                             sq          VF12, 0(VI06)
-        NOP                             sq          VF08, 1(VI06)
+        NOP                             sq          VF14, 1(VI06)
         NOP                             isw.w       VI00, 2(VI06)
         NOP                             sq.xyz      VF07, 2(VI06)
         NOP                             iaddiu      VI06, VI06, 3
