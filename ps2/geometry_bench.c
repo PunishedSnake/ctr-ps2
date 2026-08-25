@@ -3,7 +3,6 @@
 
 #include <dma.h>
 #include <draw.h>
-#include <draw3d.h>
 #include <gif_tags.h>
 #include <gs_gp.h>
 #include <packet2.h>
@@ -18,6 +17,9 @@
 #define CTRPS2_GEOMETRY_VIF_QWORDS         80
 #define CTRPS2_GEOMETRY_POSITION_DEST_QW   7
 #define CTRPS2_GEOMETRY_OUTPUT_DEST_QW     64
+#define CTRPS2_GEOMETRY_PACKED_NREG        2
+#define CTRPS2_GEOMETRY_PACKED_REGLIST \
+    (((u64)GIF_REG_RGBAQ) | ((u64)GIF_REG_XYZ2 << 4))
 
 /*
  * Each source vertex expands to one position qword plus one color qword in VU1
@@ -36,12 +38,15 @@ extern u32 CTRPS2_VU1_GeometryEnd __attribute__((section(".vudata")));
 
 /*
  * Producer: benchmark/bridge input in RDRAM.
- * Consumer: VIF1 -> VU1.
+ * Consumer: VIF1 -> VU1 -> XGKICK -> GS.
  * Position representation: signed V3-16, 6 bytes/vertex.
  * Color representation: unsigned RGBA8, 4 bytes/vertex.
  *
- * VIF1 expands both streams to one qword per vertex. The current VU program
- * uses ITOF4 only for positions; color lanes remain integer GS channel values.
+ * VIF1 expands both streams to one qword per vertex. The VU program uses ITOF4
+ * only for positions. Colors stay as four zero-extended 32-bit lanes, which is
+ * exactly the GS GIF PACKED RGBAQ source representation for R/G/B/A. With
+ * texture mapping disabled Q is irrelevant. Projected XYZ lanes likewise map
+ * directly to GIF PACKED XYZ2 after FTOI4.
  */
 static qword_t s_packedPositions[CTRPS2_GEOMETRY_MAX_POSITION_QWORDS]
     __attribute__((aligned(64)));
@@ -162,24 +167,21 @@ static void CTRPS2_BuildGeometryHeader(int primitive)
         0,
         PRIM_UNFIXED);
 
-    /* VU copies this GS-ready primitive tag to its output region. */
+    /*
+     * PACKED mode consumes one full qword for RGBAQ and one for XYZ2 per loop.
+     * That matches the VIF-expanded color vector and VU-projected XYZ vector
+     * directly, avoiding the previous ambiguous 64-bit REGLIST packing.
+     */
     s_geometryHeader[2].dw[0] = VU_GS_GIFTAG(
         s_geometryVertexCount,
         0,
         1,
         prim,
-        GIF_FLG_REGLIST,
-        3);
-    s_geometryHeader[2].dw[1] = DRAW_STQ2_REGLIST;
+        GIF_FLG_PACKED,
+        CTRPS2_GEOMETRY_PACKED_NREG);
+    s_geometryHeader[2].dw[1] = CTRPS2_GEOMETRY_PACKED_REGLIST;
 
-    /* Retained as a stable header slot; per-vertex RGBA now comes after positions. */
-    s_geometryHeader[3].sw[0] = 0x28;
-    s_geometryHeader[3].sw[1] = 0x70;
-    s_geometryHeader[3].sw[2] = 0x80;
-    s_geometryHeader[3].sw[3] = 0x80;
-
-    /* STQ base. Texture mapping is disabled, but Q remains well-defined. */
-    CTRPS2_WriteFloat(&s_geometryHeader[4], 3, 1.0f);
+    /* Header slots 3/4 stay reserved so the proven TOP-relative input ABI holds. */
 
     /* Final GS correctness fence is part of the same XGKICK stream. */
     s_geometryHeader[5].dw[0] = GIF_SET_TAG(1, 1, 0, 0, GIF_FLG_PACKED, 1);
@@ -335,10 +337,7 @@ static int CTRPS2_GeometryBenchConfigureInternal(
         s_geometryVifPacket = NULL;
     }
 
-    if (!CTRPS2_BuildGeometryVifPacket())
-        return 0;
-
-    return 1;
+    return CTRPS2_BuildGeometryVifPacket();
 }
 
 int CTRPS2_GeometryBenchConfigureV3_16(
@@ -398,7 +397,12 @@ void CTRPS2_GeometryBenchSubmit(void)
     if (s_geometrySubmitted)
         return;
 
-    /* Persistent REF sources require coherency before source-chain DMA. */
+    /*
+     * CURRENT IMPLEMENTATION: dma_channel_send_packet2(..., flush_cache=1)
+     * performs FlushCache(0) for chain mode because REF payloads are otherwise
+     * not covered by dma_channel_send_chain(). This intentionally broad flush is
+     * the correctness baseline; range-specific coherency is a later measured A/B.
+     */
     dma_channel_send_packet2(s_geometryVifPacket, DMA_CHANNEL_VIF1, 1);
     s_geometrySubmitted = 1;
 }
