@@ -103,6 +103,27 @@ int CTRPS2_LevelBridgeGetHighLodFaceMeta(
     return 1;
 }
 
+int CTRPS2_LevelBridgeResolveRawRetailOrderBias(
+    s8 *out_bias,
+    const struct CTRPS2QuadBlockRenderPrefix *raw_block,
+    u32 slot_word)
+{
+    u32 byte_offset;
+    const u8 *raw_bytes;
+
+    if (out_bias == NULL || raw_block == NULL)
+        return 0;
+
+    /* Retail computes 0x18 + (slotWord >> 2) before a signed byte load. */
+    byte_offset = 0x18u + (slot_word >> 2);
+    if (byte_offset >= sizeof(*raw_block))
+        return 0;
+
+    raw_bytes = (const u8 *)raw_block;
+    *out_bias = (s8)raw_bytes[byte_offset];
+    return 1;
+}
+
 /*
  * Source-layout fixture for the bridge itself. The important property is not
  * the coordinates but the memory contract: nine 0x10-byte LevVertex records
@@ -127,14 +148,17 @@ static const struct CTRPS2QuadBlockRenderPrefix s_fixtureQuadBlock = {
     .quad_flags = 0,
     .draw_order_low = 0x80000000u | (5u << 8) | (10u << 13) | (15u << 18) | (20u << 23),
     .draw_order_high = 0xff0702fcu,
-    .texture_mid_ref = {0x00100000u, 0x00101000u, 0x00102000u, 0x00103000u},
+    .texture_mid_ref = {0x44332211u, 0x88776655u, 0xccbbaa99u, 0x00ffe eddu},
 };
 
 static int CTRPS2_LevelBridgeValidateFixtureMeta(void)
 {
     static const u8 expected_face_field[4] = {5, 10, 15, 20};
     static const s8 expected_order_bias[4] = {-4, 2, 7, -1};
+    static const u32 raw_slot_words[6] = {0x0, 0xc, 0x18, 0x24, 0x30, 0x3c};
+    static const s8 raw_slot_bias[6] = {-4, -1, 0x33, 0x66, (s8)0x99, (s8)0xcc};
     u32 face;
+    u32 slot;
 
     for (face = 0; face < CTRPS2_LEVEL_HIGH_LOD_FACE_COUNT; ++face)
     {
@@ -153,6 +177,19 @@ static int CTRPS2_LevelBridgeValidateFixtureMeta(void)
         if (!meta.double_sided)
             return 0;
         if (meta.texture_ref != s_fixtureQuadBlock.texture_mid_ref[face])
+            return 0;
+    }
+
+    for (slot = 0; slot < 6; ++slot)
+    {
+        s8 bias;
+
+        if (!CTRPS2_LevelBridgeResolveRawRetailOrderBias(
+                &bias,
+                &s_fixtureQuadBlock,
+                raw_slot_words[slot]))
+            return 0;
+        if (bias != raw_slot_bias[slot])
             return 0;
     }
 
