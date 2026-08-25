@@ -29,8 +29,8 @@
 #define CTRPS2_VIF_PACKET_QWORDS  32
 #define CTRPS2_GIF_PACKET_QWORDS  16
 
-extern u32 CTRPS2_VU1_BootStart[];
-extern u32 CTRPS2_VU1_BootEnd[];
+extern u32 CTRPS2_VU1_BootStart __attribute__((section(".vudata")));
+extern u32 CTRPS2_VU1_BootEnd __attribute__((section(".vudata")));
 
 static framebuffer_t s_frame;
 static zbuffer_t s_zbuffer;
@@ -134,8 +134,8 @@ static int CTRPS2_UploadVu1Program(void)
     u32 qwords;
 
     qwords = packet2_utils_get_packet_size_for_program(
-        CTRPS2_VU1_BootStart,
-        CTRPS2_VU1_BootEnd) + 2;
+        &CTRPS2_VU1_BootStart,
+        &CTRPS2_VU1_BootEnd) + 2;
 
     upload = packet2_create((u16)qwords, P2_TYPE_NORMAL, P2_MODE_CHAIN, 1);
     if (upload == NULL)
@@ -144,8 +144,8 @@ static int CTRPS2_UploadVu1Program(void)
     packet2_vif_add_micro_program(
         upload,
         0,
-        CTRPS2_VU1_BootStart,
-        CTRPS2_VU1_BootEnd);
+        &CTRPS2_VU1_BootStart,
+        &CTRPS2_VU1_BootEnd);
     packet2_utils_vu_add_end_tag(upload);
 
     dma_channel_send_packet2(upload, DMA_CHANNEL_VIF1, 1);
@@ -233,11 +233,16 @@ static int CTRPS2_BuildBootstrapVifPacket(void)
 {
     u32 gifQwords = packet2_get_qw_count(s_bootGifPacket);
 
+    /*
+     * TTE=1 is part of this packet contract. packet2's VIF chain helpers place
+     * their two VIF codes in the DMA tag transfer payload. With TTE disabled,
+     * those words would instead be interpreted as the next DMA tag.
+     */
     s_bootVifPacket = packet2_create(
         CTRPS2_VIF_PACKET_QWORDS,
         P2_TYPE_NORMAL,
         P2_MODE_CHAIN,
-        0);
+        1);
     if (s_bootVifPacket == NULL)
         return 0;
 
