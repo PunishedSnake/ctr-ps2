@@ -108,7 +108,7 @@ int CTRPS2_LevelBridgeBenchRun(void)
         if (!CTRPS2_GeometryBenchConfigureV3_16(
                 packed,
                 (u32)count,
-                PRIM_TRIANGLE_STRIP))
+                GS_PRIM_TRIANGLE_STRIP))
             return 0;
 
         CTRPS2_GeometryBenchSubmit();
