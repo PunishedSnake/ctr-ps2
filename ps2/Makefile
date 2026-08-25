@@ -1,5 +1,5 @@
 EE_BIN = ctr_ps2_renderer.elf
-EE_OBJS = vu1_boot.o vu1_geometry.o main.o renderer_ps2.o geometry_bench.o
+EE_OBJS = vu1_boot.o vu1_geometry.o main.o renderer_ps2.o geometry_bench.o ctr_level_bridge.o
 EE_LIBS = -ldraw -lgraph -lpacket2 -ldma
 EE_DVP = dvp-as
 
