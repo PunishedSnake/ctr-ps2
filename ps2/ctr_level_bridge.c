@@ -148,7 +148,7 @@ static const struct CTRPS2QuadBlockRenderPrefix s_fixtureQuadBlock = {
     .quad_flags = 0,
     .draw_order_low = 0x80000000u | (5u << 8) | (10u << 13) | (15u << 18) | (20u << 23),
     .draw_order_high = 0xff0702fcu,
-    .texture_mid_ref = {0x44332211u, 0x88776655u, 0xccbbaa99u, 0x00ffe eddu},
+    .texture_mid_ref = {0x44332211u, 0x88776655u, 0xccbbaa99u, 0x00ffeeddU},
 };
 
 static int CTRPS2_LevelBridgeValidateFixtureMeta(void)
