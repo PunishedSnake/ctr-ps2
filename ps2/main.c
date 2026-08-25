@@ -4,6 +4,13 @@
 
 #include <kernel.h>
 
+static void CTRPS2_FailAfterRenderer(u8 r, u8 g, u8 b)
+{
+    CTRPS2_RendererClear(r, g, b);
+    for (;;)
+        CTRPS2_RendererPresent();
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -15,24 +22,14 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    /* M0: prove ready-made GIF transport through VIF1/VU1/XGKICK. */
-    CTRPS2_RendererSubmitBootstrap();
-    CTRPS2_RendererWaitForBootstrap();
-
     /*
-     * M1: replace ready-made XYZ2 with signed V3-16 geometry. VIF1 expands it,
-     * VU1 converts/transforms/projects it and produces the GS packet itself.
+     * Geometry init uploads the VU1 microprogram and shared matrix. It also
+     * prepares the old M1 triangle packet, but the prototype intentionally does
+     * not submit that packet anymore. M2b is now the only visible geometry draw.
      */
     if (!CTRPS2_GeometryBenchInit())
-    {
-        SleepThread();
-        return 2;
-    }
+        CTRPS2_FailAfterRenderer(72, 12, 12);
 
-    CTRPS2_GeometryBenchSubmit();
-    CTRPS2_GeometryBenchWait();
-
-    /* Leave the final frame showing only the level-geometry prototype. */
     CTRPS2_RendererClear(10, 14, 24);
 
     /*
@@ -42,10 +39,7 @@ int main(int argc, char *argv[])
      * block with one VIF1/VU1/XGKICK submission.
      */
     if (!CTRPS2_LevelBridgeBenchRun())
-    {
-        SleepThread();
-        return 3;
-    }
+        CTRPS2_FailAfterRenderer(72, 12, 72);
 
     for (;;)
         CTRPS2_RendererPresent();
