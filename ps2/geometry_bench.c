@@ -14,24 +14,27 @@
 
 #define CTRPS2_GEOMETRY_PROGRAM_ADDR       64
 #define CTRPS2_GEOMETRY_HEADER_QWORDS      7
-#define CTRPS2_GEOMETRY_VIF_QWORDS         80
+#define CTRPS2_GEOMETRY_VIF_QWORDS         96
 #define CTRPS2_GEOMETRY_POSITION_DEST_QW   7
-#define CTRPS2_GEOMETRY_OUTPUT_DEST_QW     64
-#define CTRPS2_GEOMETRY_PACKED_NREG        2
+#define CTRPS2_GEOMETRY_OUTPUT_DEST_QW     96
+#define CTRPS2_GEOMETRY_PACKED_NREG        3
 #define CTRPS2_GEOMETRY_PACKED_REGLIST \
-    (((u64)GIF_REG_RGBAQ) | ((u64)GIF_REG_XYZ2 << 4))
+    (((u64)GIF_REG_RGBAQ) | ((u64)GIF_REG_UV << 4) | ((u64)GIF_REG_XYZ2 << 8))
 
 /*
- * Each source vertex expands to one position qword plus one color qword in VU1
- * memory. Output still begins at TOP+64, therefore the correctness-first input
- * limit is floor((64-7)/2) = 28 vertices. The M2 QuadBlock strip uses 22.
+ * M3 input expands to three VU qwords per vertex: position, color and UV.
+ * Output starts at TOP+96, so floor((96-7)/3) = 29 vertices remain legal.
+ * The current QuadBlock strip uses 22. Output itself is 1 + 3*N + 2 qwords,
+ * well inside one 496-qword TOP/TOPS buffer.
  */
 #define CTRPS2_GEOMETRY_MAX_VERTICES \
-    ((CTRPS2_GEOMETRY_OUTPUT_DEST_QW - CTRPS2_GEOMETRY_POSITION_DEST_QW) / 2u)
+    ((CTRPS2_GEOMETRY_OUTPUT_DEST_QW - CTRPS2_GEOMETRY_POSITION_DEST_QW) / 3u)
 #define CTRPS2_GEOMETRY_MAX_POSITION_QWORDS \
     ((CTRPS2_GEOMETRY_MAX_VERTICES * 3u * sizeof(s16) + 15u) / 16u)
 #define CTRPS2_GEOMETRY_MAX_COLOR_QWORDS \
     ((CTRPS2_GEOMETRY_MAX_VERTICES * 4u * sizeof(u8) + 15u) / 16u)
+#define CTRPS2_GEOMETRY_MAX_UV_QWORDS \
+    ((CTRPS2_GEOMETRY_MAX_VERTICES * 4u * sizeof(u16) + 15u) / 16u)
 
 extern u32 CTRPS2_VU1_GeometryStart __attribute__((section(".vudata")));
 extern u32 CTRPS2_VU1_GeometryEnd __attribute__((section(".vudata")));
@@ -41,19 +44,18 @@ extern u32 CTRPS2_VU1_GeometryEnd __attribute__((section(".vudata")));
  * Consumer: VIF1 -> VU1 -> XGKICK -> GS.
  * Position representation: signed V3-16, 6 bytes/vertex.
  * Color representation: unsigned RGBA8, 4 bytes/vertex.
+ * UV representation: unsigned V4-16, 8 bytes/vertex; U/V are GS 12.4 fixed.
  *
- * VIF1 expands both streams to one qword per vertex. The VU program uses ITOF4
- * only for positions. Colors stay as four zero-extended 32-bit lanes, which is
- * exactly the GS GIF PACKED RGBAQ source representation for R/G/B/A. With
- * texture mapping disabled Q is irrelevant. Projected XYZ lanes likewise map
- * directly to GIF PACKED XYZ2 after FTOI4.
+ * VIF1 expands each stream to one qword per vertex. The VU program converts
+ * only positions to float, leaving color and UV lanes in GS-ready integer form.
  */
 static qword_t s_packedPositions[CTRPS2_GEOMETRY_MAX_POSITION_QWORDS]
     __attribute__((aligned(64)));
 static qword_t s_packedColors[CTRPS2_GEOMETRY_MAX_COLOR_QWORDS]
     __attribute__((aligned(64)));
+static qword_t s_packedUVs[CTRPS2_GEOMETRY_MAX_UV_QWORDS]
+    __attribute__((aligned(64)));
 
-/* Header is persistent and copied by VIF into the active TOPS buffer. */
 static qword_t s_geometryHeader[CTRPS2_GEOMETRY_HEADER_QWORDS]
     __attribute__((aligned(64)));
 
@@ -69,6 +71,8 @@ static packet2_t *s_geometryVifPacket;
 static u32 s_geometryVertexCount;
 static u32 s_geometryPositionQwords;
 static u32 s_geometryColorQwords;
+static u32 s_geometryUVQwords;
+static int s_geometryTextured;
 static int s_geometrySubmitted;
 static int s_geometryInitialized;
 
@@ -139,13 +143,11 @@ static void CTRPS2_BuildGeometryHeader(int primitive)
 
     memset(s_geometryHeader, 0, sizeof(s_geometryHeader));
 
-    /* scale.xyz + count.w */
     CTRPS2_WriteFloat(&s_geometryHeader[0], 0, CTRPS2_FRAME_WIDTH * 0.5f);
     CTRPS2_WriteFloat(&s_geometryHeader[0], 1, CTRPS2_FRAME_HEIGHT * 0.5f);
     CTRPS2_WriteFloat(&s_geometryHeader[0], 2, zScale);
     s_geometryHeader[0].sw[3] = s_geometryVertexCount;
 
-    /* Distinct screen offset lets scale and GS XYOFFSET remain independent. */
     CTRPS2_WriteFloat(
         &s_geometryHeader[1],
         0,
@@ -159,19 +161,15 @@ static void CTRPS2_BuildGeometryHeader(int primitive)
     prim = GS_SET_PRIM(
         primitive,
         PRIM_SHADE_GOURAUD,
+        s_geometryTextured ? DRAW_ENABLE : DRAW_DISABLE,
         DRAW_DISABLE,
         DRAW_DISABLE,
         DRAW_DISABLE,
-        DRAW_DISABLE,
-        PRIM_MAP_ST,
+        PRIM_MAP_UV,
         0,
         PRIM_UNFIXED);
 
-    /*
-     * PACKED mode consumes one full qword for RGBAQ and one for XYZ2 per loop.
-     * That matches the VIF-expanded color vector and VU-projected XYZ vector
-     * directly, avoiding the previous ambiguous 64-bit REGLIST packing.
-     */
+    /* One GS PACKED register qword for RGBAQ, UV and XYZ2 per vertex. */
     s_geometryHeader[2].dw[0] = VU_GS_GIFTAG(
         s_geometryVertexCount,
         0,
@@ -181,9 +179,8 @@ static void CTRPS2_BuildGeometryHeader(int primitive)
         CTRPS2_GEOMETRY_PACKED_NREG);
     s_geometryHeader[2].dw[1] = CTRPS2_GEOMETRY_PACKED_REGLIST;
 
-    /* Header slots 3/4 stay reserved so the proven TOP-relative input ABI holds. */
+    /* Header slots 3/4 remain reserved to keep the established input ABI. */
 
-    /* Final GS correctness fence is part of the same XGKICK stream. */
     s_geometryHeader[5].dw[0] = GIF_SET_TAG(1, 1, 0, 0, GIF_FLG_PACKED, 1);
     s_geometryHeader[5].dw[1] = GIF_REG_AD;
     s_geometryHeader[6].dw[0] = 1;
@@ -201,13 +198,11 @@ static void CTRPS2_AddV3_16PositionUnpack(packet2_t *packet)
     mask.m11 = 1;
     mask.m15 = 1;
 
-    /* ROW.W supplies homogeneous W=1.0 without source bandwidth. */
     packet2_chain_open_cnt(packet, 0, 0, 0);
     packet2_vif_strow(packet, row, 0);
     packet2_vif_nop(packet, 0);
     packet2_chain_close_tag(packet);
 
-    /* X/Y/Z come from input; W comes from ROW for every write-cycle group. */
     packet2_chain_open_cnt(packet, 0, 0, 0);
     packet2_vif_stmask(packet, mask, 0);
     packet2_chain_close_tag(packet);
@@ -233,10 +228,6 @@ static void CTRPS2_AddV3_16PositionUnpack(packet2_t *packet)
 
 static void CTRPS2_AddRGBA8ColorUnpack(packet2_t *packet)
 {
-    /*
-     * Current packet2 contract: usigned=1 zero-extends each V4-8 component.
-     * The destination follows the expanded position span, one qword per vertex.
-     */
     packet2_chain_ref(
         packet,
         s_packedColors,
@@ -249,6 +240,27 @@ static void CTRPS2_AddRGBA8ColorUnpack(packet2_t *packet)
         packet,
         P2_UNPACK_V4_8,
         CTRPS2_GEOMETRY_POSITION_DEST_QW + s_geometryVertexCount,
+        1,
+        0,
+        1,
+        0);
+    packet2_vif_close_unpack_manual(packet, s_geometryVertexCount);
+}
+
+static void CTRPS2_AddUV16Unpack(packet2_t *packet)
+{
+    packet2_chain_ref(
+        packet,
+        s_packedUVs,
+        s_geometryUVQwords,
+        0,
+        0,
+        0);
+    packet2_vif_stcycl(packet, 0, 0x0101, 0);
+    packet2_vif_open_unpack(
+        packet,
+        P2_UNPACK_V4_16,
+        CTRPS2_GEOMETRY_POSITION_DEST_QW + (s_geometryVertexCount * 2u),
         1,
         0,
         1,
@@ -275,12 +287,9 @@ static int CTRPS2_BuildGeometryVifPacket(void)
 
     CTRPS2_AddV3_16PositionUnpack(s_geometryVifPacket);
     CTRPS2_AddRGBA8ColorUnpack(s_geometryVifPacket);
+    CTRPS2_AddUV16Unpack(s_geometryVifPacket);
 
-    /*
-     * CURRENT IMPLEMENTATION baseline. This helper emits FLUSH + MSCAL.
-     * Barrier narrowing belongs to a later A/B after real-hardware ownership
-     * and completion have been reproduced for this exact stream.
-     */
+    /* CURRENT IMPLEMENTATION: helper emits the conservative FLUSH + MSCAL. */
     packet2_utils_vu_add_start_program(
         s_geometryVifPacket,
         CTRPS2_GEOMETRY_PROGRAM_ADDR);
@@ -291,12 +300,14 @@ static int CTRPS2_BuildGeometryVifPacket(void)
 static int CTRPS2_GeometryBenchConfigureInternal(
     const void *positions_v3_16,
     const void *colors_rgba8,
+    const void *uvs_v4_16,
     u32 vertex_count,
     int gs_primitive)
 {
-    static const u8 fallbackColor[4] = {0x28, 0x70, 0x80, 0x80};
+    static const u8 fallbackColor[4] = {0x80, 0x80, 0x80, 0x80};
     u32 position_bytes;
     u32 color_bytes;
+    u32 uv_bytes;
     u32 i;
 
     if (!s_geometryInitialized)
@@ -310,12 +321,16 @@ static int CTRPS2_GeometryBenchConfigureInternal(
 
     position_bytes = vertex_count * 3u * sizeof(s16);
     color_bytes = vertex_count * 4u * sizeof(u8);
+    uv_bytes = vertex_count * 4u * sizeof(u16);
     s_geometryPositionQwords = (position_bytes + 15u) / 16u;
     s_geometryColorQwords = (color_bytes + 15u) / 16u;
+    s_geometryUVQwords = (uv_bytes + 15u) / 16u;
     s_geometryVertexCount = vertex_count;
+    s_geometryTextured = (uvs_v4_16 != NULL);
 
     memset(s_packedPositions, 0, sizeof(s_packedPositions));
     memset(s_packedColors, 0, sizeof(s_packedColors));
+    memset(s_packedUVs, 0, sizeof(s_packedUVs));
     memcpy(s_packedPositions, positions_v3_16, position_bytes);
 
     if (colors_rgba8 != NULL)
@@ -328,6 +343,9 @@ static int CTRPS2_GeometryBenchConfigureInternal(
         for (i = 0; i < vertex_count; ++i)
             memcpy(dst + i * 4u, fallbackColor, sizeof(fallbackColor));
     }
+
+    if (uvs_v4_16 != NULL)
+        memcpy(s_packedUVs, uvs_v4_16, uv_bytes);
 
     CTRPS2_BuildGeometryHeader(gs_primitive);
 
@@ -348,6 +366,7 @@ int CTRPS2_GeometryBenchConfigureV3_16(
     return CTRPS2_GeometryBenchConfigureInternal(
         positions_v3_16,
         NULL,
+        NULL,
         vertex_count,
         gs_primitive);
 }
@@ -364,18 +383,31 @@ int CTRPS2_GeometryBenchConfigureV3_16_RGBA8(
     return CTRPS2_GeometryBenchConfigureInternal(
         positions_v3_16,
         colors_rgba8,
+        NULL,
+        vertex_count,
+        gs_primitive);
+}
+
+int CTRPS2_GeometryBenchConfigureV3_16_RGBA8_UV16(
+    const void *positions_v3_16,
+    const void *colors_rgba8,
+    const void *uvs_v4_16,
+    u32 vertex_count,
+    int gs_primitive)
+{
+    if (colors_rgba8 == NULL || uvs_v4_16 == NULL)
+        return 0;
+
+    return CTRPS2_GeometryBenchConfigureInternal(
+        positions_v3_16,
+        colors_rgba8,
+        uvs_v4_16,
         vertex_count,
         gs_primitive);
 }
 
 int CTRPS2_GeometryBenchInit(void)
 {
-    static const s16 baselinePositions[3][3] = {
-        {-8, -8, 0},
-        { 0, 10, 0},
-        { 8, -8, 0},
-    };
-
     if (!CTRPS2_UploadGeometryProgram())
         return 0;
     if (!CTRPS2_UploadGeometryMatrix())
@@ -383,11 +415,7 @@ int CTRPS2_GeometryBenchInit(void)
 
     s_geometrySubmitted = 0;
     s_geometryInitialized = 1;
-
-    return CTRPS2_GeometryBenchConfigureV3_16(
-        baselinePositions,
-        3,
-        PRIM_TRIANGLE);
+    return 1;
 }
 
 void CTRPS2_GeometryBenchSubmit(void)
@@ -398,10 +426,8 @@ void CTRPS2_GeometryBenchSubmit(void)
         return;
 
     /*
-     * CURRENT IMPLEMENTATION: dma_channel_send_packet2(..., flush_cache=1)
-     * performs FlushCache(0) for chain mode because REF payloads are otherwise
-     * not covered by dma_channel_send_chain(). This intentionally broad flush is
-     * the correctness baseline; range-specific coherency is a later measured A/B.
+     * CURRENT IMPLEMENTATION: packet2 chain flush=1 performs FlushCache(0),
+     * covering the persistent position/color/UV REF payloads as well as tags.
      */
     dma_channel_send_packet2(s_geometryVifPacket, DMA_CHANNEL_VIF1, 1);
     s_geometrySubmitted = 1;
