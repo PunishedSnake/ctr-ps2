@@ -72,6 +72,17 @@ int CTRPS2_LevelBridgeGetHighLodFaceMeta(
     const struct CTRPS2QuadBlockRenderPrefix *block,
     u32 face_index);
 
+/*
+ * Resolve retail's byte-addressed ordering side-channel from an unmodified raw
+ * QuadBlock prefix. This must run before texture pointer words are rebased or
+ * replaced by native/GS handles. It is intended for asset conversion, not the
+ * steady-state draw loop.
+ */
+int CTRPS2_LevelBridgeResolveRawRetailOrderBias(
+    s8 *out_bias,
+    const struct CTRPS2QuadBlockRenderPrefix *raw_block,
+    u32 slot_word);
+
 /* Draw a source-layout fixture through the current M1 VIF1/VU1 path. */
 int CTRPS2_LevelBridgeBenchRun(void);
 
