@@ -32,11 +32,14 @@ int main(int argc, char *argv[])
     CTRPS2_GeometryBenchSubmit();
     CTRPS2_GeometryBenchWait();
 
+    /* Leave the final frame showing only the level-geometry prototype. */
+    CTRPS2_RendererClear(10, 14, 24);
+
     /*
-     * M2a bridge baseline: consume the current CTR QuadBlock.index[9] +
-     * LevVertex layout and draw its four high-LOD grid faces through M1.
-     * This deliberately keeps four independent, fenced batches for the first
-     * correctness reproduction. The next optimization is to batch them.
+     * M2b: consume the current CTR QuadBlock.index[9] + LevVertex layout,
+     * gather all four ordinary high-LOD faces into one 22-vertex triangle strip,
+     * stream packed RGBA8 colors beside V3-16 positions, and render the whole
+     * block with one VIF1/VU1/XGKICK submission.
      */
     if (!CTRPS2_LevelBridgeBenchRun())
     {
