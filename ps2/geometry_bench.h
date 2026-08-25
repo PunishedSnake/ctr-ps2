@@ -24,6 +24,18 @@ int CTRPS2_GeometryBenchConfigureV3_16_RGBA8(
     u32 vertex_count,
     int gs_primitive);
 
+/*
+ * M3 textured path. UV input is four unsigned 16-bit components per vertex;
+ * only U/V are consumed by GS, while zero Z/W keep the VIF-expanded qword fully
+ * deterministic. U/V use the GS 12.4 fixed-point convention expected by UV.
+ */
+int CTRPS2_GeometryBenchConfigureV3_16_RGBA8_UV16(
+    const void *positions_v3_16,
+    const void *colors_rgba8,
+    const void *uvs_v4_16,
+    u32 vertex_count,
+    int gs_primitive);
+
 void CTRPS2_GeometryBenchSubmit(void);
 void CTRPS2_GeometryBenchWait(void);
 
