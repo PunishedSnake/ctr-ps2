@@ -9,9 +9,21 @@
 #define CTRPS2_LEVEL_FACE_POSITION_QWORDS 2
 
 /*
+ * Four independent 4-vertex strips are joined by two connector vertices per
+ * boundary. The duplicated boundary/first vertices generate only degenerate
+ * triangles, preserving one GS triangle-strip primitive for the whole block.
+ */
+#define CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT \
+    (CTRPS2_LEVEL_FACE_VERTEX_COUNT + (CTRPS2_LEVEL_HIGH_LOD_FACE_COUNT - 1) * 6)
+#define CTRPS2_LEVEL_QUADBLOCK_STRIP_POSITION_QWORDS \
+    ((CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT * 3u * sizeof(s16) + 15u) / 16u)
+#define CTRPS2_LEVEL_QUADBLOCK_STRIP_COLOR_QWORDS \
+    ((CTRPS2_LEVEL_QUADBLOCK_STRIP_VERTEX_COUNT * 4u * sizeof(u8) + 15u) / 16u)
+
+/*
  * PS2-owned read-only views of the current ctr-native level layout.
  *
- * These are deliberately only the prefixes/fields needed by M2a. They are not
+ * These are deliberately only the prefixes/fields needed by M2. They are not
  * a second authoritative definition of the full game structs. Current source:
  *   LevVertex  = SVec3 pos + flags + color_hi[4] + color_lo[4] (0x10 bytes)
  *   QuadBlock  = u16 index[9] at 0x00, flags at 0x12, draw-order words at
@@ -66,6 +78,21 @@ int CTRPS2_LevelBridgePackHighLodFaceV3_16(
     u32 vertex_count,
     u32 face_index);
 
+/*
+ * Expand the four ordinary high-LOD faces into one GS triangle strip. Position
+ * output is packed V3-16; color output is packed RGBA8 taken from color_hi with
+ * prototype alpha forced to 0x80. Runtime gathering is still transitional: the
+ * shipping asset pipeline should prebuild this consumer-ready representation.
+ */
+int CTRPS2_LevelBridgePackHighLodQuadBlockStrip(
+    qword_t *positions_dst,
+    u32 position_dst_qwords,
+    qword_t *colors_dst,
+    u32 color_dst_qwords,
+    const struct CTRPS2QuadBlockRenderPrefix *block,
+    const struct CTRPS2LevelVertexView *vertices,
+    u32 vertex_count);
+
 /* Decode the ordinary high-LOD face state before PS1-specific rendering. */
 int CTRPS2_LevelBridgeGetHighLodFaceMeta(
     struct CTRPS2LevelHighLodFaceMeta *out,
@@ -83,7 +110,7 @@ int CTRPS2_LevelBridgeResolveRawRetailOrderBias(
     const struct CTRPS2QuadBlockRenderPrefix *raw_block,
     u32 slot_word);
 
-/* Draw a source-layout fixture through the current M1 VIF1/VU1 path. */
+/* Draw a source-layout fixture through the current VIF1/VU1 path. */
 int CTRPS2_LevelBridgeBenchRun(void);
 
 #endif
