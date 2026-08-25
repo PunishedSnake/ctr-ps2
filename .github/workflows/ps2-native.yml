@@ -32,3 +32,17 @@ jobs:
 
       - name: Build PS2 native target
         run: make -C ps2
+
+      - name: Verify ELF
+        run: |
+          test -s ps2/ctr_ps2_renderer.elf
+          mips64r5900el-ps2-elf-readelf -h ps2/ctr_ps2_renderer.elf
+          ls -lh ps2/ctr_ps2_renderer.elf
+          sha256sum ps2/ctr_ps2_renderer.elf
+
+      - name: Upload PS2 ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctr-ps2-native-elf
+          path: ps2/ctr_ps2_renderer.elf
+          if-no-files-found: error
