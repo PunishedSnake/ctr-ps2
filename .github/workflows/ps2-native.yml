@@ -4,12 +4,14 @@ on:
   pull_request:
     paths:
       - "ps2/**"
+      - "docs/CTR_PS2_RENDER_BRIDGE.md"
       - ".github/workflows/ps2-native.yml"
   push:
     branches:
       - "feature/ps2-native-renderer"
     paths:
       - "ps2/**"
+      - "docs/CTR_PS2_RENDER_BRIDGE.md"
       - ".github/workflows/ps2-native.yml"
 
 jobs:
