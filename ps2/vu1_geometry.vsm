@@ -1,0 +1,99 @@
+; CTR PS2 VU1 packed textured-geometry prototype
+;
+; Common VU1 memory (absolute):
+;   0..3   object-to-screen matrix columns
+;
+; Current TOP/TOPS-relative input:
+;   0      scale.xyz + vertex_count.w
+;   1      screen offset.xyz
+;   2      primitive GIFtag (PACKED RGBAQ, UV, XYZ2)
+;   3..4   reserved
+;   5      FINISH GIFtag
+;   6      FINISH A+D payload
+;   7..7+N-1       positions expanded from signed V3-16
+;   7+N..7+2N-1    colors expanded from unsigned V4-8
+;   7+2N..7+3N-1   UV expanded from unsigned V4-16
+;
+; Output begins at TOP+96:
+;   GIFtag
+;   [packed RGBAQ qword, packed UV qword, packed XYZ2 qword] * N
+;   FINISH GIFtag + A+D payload
+;
+; VIF performs width expansion. VU1 converts only position data to float;
+; RGBA and UV stay in integer lanes ready for the GS PACKED register path.
+
+        .vu
+        .align 4
+        .global CTRPS2_VU1_GeometryStart
+        .global CTRPS2_VU1_GeometryEnd
+
+CTRPS2_VU1_GeometryStart:
+        NOP                             lq          VF01, 0(VI00)
+        NOP                             xtop        VI02
+        NOP                             lq          VF02, 1(VI00)
+        NOP                             lq          VF03, 2(VI00)
+        NOP                             lq          VF04, 3(VI00)
+
+        NOP                             lq          VF05, 0(VI02)
+        NOP                             lq          VF13, 1(VI02)
+        NOP                             lq          VF06, 2(VI02)
+        NOP                             lq          VF10, 5(VI02)
+        NOP                             lq          VF11, 6(VI02)
+
+        NOP                             ilw.w       VI07, 0(VI02)
+        NOP                             iaddiu      VI03, VI02, 7
+        NOP                             iadd        VI04, VI03, VI07
+        NOP                             iadd        VI08, VI04, VI00
+        NOP                             iadd        VI09, VI08, VI07
+        NOP                             iaddiu      VI05, VI02, 96
+        NOP                             iaddiu      VI06, VI05, 0
+        NOP                             sqi         VF06, (VI06++)
+
+CTRPS2_VU1_GeometryLoop:
+        NOP                             lq          VF07, 0(VI03)
+        NOP                             lq          VF14, 0(VI08)
+        NOP                             lq          VF15, 0(VI09)
+        NOP                             iaddiu      VI03, VI03, 1
+        NOP                             iaddiu      VI08, VI08, 1
+        NOP                             iaddiu      VI09, VI09, 1
+        itof4.xyz     VF07, VF07        NOP
+        NOP                             NOP
+        NOP                             NOP
+        NOP                             NOP
+        NOP                             NOP
+
+        mulax         ACC, VF01, VF07x  NOP
+        madday        ACC, VF02, VF07y  NOP
+        maddaz        ACC, VF03, VF07z  NOP
+        maddw         VF07, VF04, VF07w NOP
+
+        NOP                             div         Q, VF00w, VF07w
+        NOP                             NOP
+        NOP                             NOP
+        NOP                             NOP
+        NOP                             NOP
+        NOP                             NOP
+        NOP                             NOP
+        NOP                             NOP
+
+        mulq.xyz      VF07, VF07, Q     NOP
+        mul.xyz       VF07, VF07, VF05  NOP
+        add.xyz       VF07, VF07, VF13  NOP
+        ftoi4.xyz     VF07, VF07        NOP
+
+        NOP                             sq          VF14, 0(VI06)
+        NOP                             sq          VF15, 1(VI06)
+        NOP                             isw.w       VI00, 2(VI06)
+        NOP                             sq.xyz      VF07, 2(VI06)
+        NOP                             iaddiu      VI06, VI06, 3
+        NOP                             ibne        VI03, VI04, CTRPS2_VU1_GeometryLoop
+        NOP                             NOP
+
+        NOP                             sqi         VF10, (VI06++)
+        NOP                             sqi         VF11, (VI06++)
+        NOP                             xgkick      VI05
+        NOP[E]                          NOP
+        NOP                             NOP
+
+        .align 4
+CTRPS2_VU1_GeometryEnd:

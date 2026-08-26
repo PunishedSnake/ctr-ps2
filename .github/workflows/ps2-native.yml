@@ -1,0 +1,74 @@
+name: PS2 native renderer
+
+on:
+  pull_request:
+    paths:
+      - "ps2/**"
+      - "docs/CTR_PS2_RENDER_BRIDGE.md"
+      - ".github/workflows/ps2-native.yml"
+  push:
+    branches:
+      - "feature/ps2-native-renderer"
+    paths:
+      - "ps2/**"
+      - "docs/CTR_PS2_RENDER_BRIDGE.md"
+      - ".github/workflows/ps2-native.yml"
+
+jobs:
+  build-ee:
+    runs-on: ubuntu-latest
+    container:
+      image: ps2dev/ps2dev:latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build driver
+        run: apk add --no-cache make
+
+      - name: Toolchain versions
+        run: |
+          mips64r5900el-ps2-elf-gcc --version
+          dvp-as --version || true
+
+      - name: Build N1c conservative pass
+        run: |
+          mkdir -p ps2/ci
+          make -C ps2 clean
+          make -C ps2
+          cp ps2/ctr_ps2_renderer.elf ps2/ci/ctr_ps2_n1c.elf
+
+      - name: Verify N1c ELF
+        run: |
+          test -s ps2/ci/ctr_ps2_n1c.elf
+          mips64r5900el-ps2-elf-readelf -h ps2/ci/ctr_ps2_n1c.elf
+          ls -lh ps2/ci/ctr_ps2_n1c.elf
+          sha256sum ps2/ci/ctr_ps2_n1c.elf
+
+      - name: Build N1d reuse-aware pass
+        run: |
+          make -C ps2 clean
+          make -C ps2 NATIVE_VIF_REUSE_AWARE=1
+          cp ps2/ctr_ps2_renderer.elf ps2/ci/ctr_ps2_n1d.elf
+
+      - name: Verify N1d ELF
+        run: |
+          test -s ps2/ci/ctr_ps2_n1d.elf
+          mips64r5900el-ps2-elf-readelf -h ps2/ci/ctr_ps2_n1d.elf
+          ls -lh ps2/ci/ctr_ps2_n1d.elf
+          sha256sum ps2/ci/ctr_ps2_n1d.elf
+
+      - name: Upload N1c conservative ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctr-ps2-native-n1c
+          path: ps2/ci/ctr_ps2_n1c.elf
+          if-no-files-found: error
+
+      - name: Upload N1d reuse-aware ELF
+        uses: actions/upload-artifact@v4
+        with:
+          name: ctr-ps2-native-n1d
+          path: ps2/ci/ctr_ps2_n1d.elf
+          if-no-files-found: error
