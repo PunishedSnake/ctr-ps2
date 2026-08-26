@@ -1,54 +1,101 @@
-# CTR PS2 native renderer proof
+# CTR PS2 native renderer
 
 This directory is the PlayStation 2-native renderer target. It does not use SDL,
 OpenGL, the desktop VRAM mirror, or the desktop GPU renderer.
 
 ## Current milestones
 
-The executable now contains two deliberately small proofs.
+### N0: PS1-free native track path - POTWIERDZONE on real hardware
 
-### M0: transport
-
-```text
-EE/RDRAM ready GIF packet
-  -> DMAC VIF1 chain
-  -> VIF1 REF + UNPACK
-  -> VU1 TOP/TOPS buffer
-  -> VU1 xtop + xgkick
-  -> GIF PATH1
-  -> GS
-```
-
-### M1: packed transformed geometry
+The default native architecture has already reproduced textured perspective
+geometry on a real PlayStation 2:
 
 ```text
-signed V3-16 positions (6 bytes/vertex)
+p2trk immutable geometry streams
   -> DMAC REF
-  -> VIF1 V3-16 UNPACK
-  -> STMASK + STROW supplies W=1.0
-  -> VU1 ITOF4
-  -> 4x4 transform
-  -> DIV Q / projection
-  -> screen scale + offset
-  -> FTOI4
-  -> VU1-built ST/RGBAQ/XYZ2 REGLIST
-  -> XGKICK
+  -> VIF1 UNPACK / TOP/TOPS
+  -> VU1 transform + DIV Q
+  -> VU1-built GS packet
+  -> XGKICK / GIF PATH1
   -> GS
 ```
 
-The V3-16 source is a transport representation, not a C runtime vertex struct.
-VIF1 expands each signed component to a 32-bit VU field and inserts homogeneous
-W from ROW. VU1 performs the integer-to-float conversion locally.
+The N0 executable does not link the old `ctr_level_bridge`, PS1 VRAM decoder,
+`TextureLayout` packer, or desktop renderer. Those remain only as importer and
+correctness-oracle research in the repository.
+
+N0 uses native PSMT4 + GS CLUT residency and a fixed prototype 3D camera. Its
+remaining intentional limitation is affine `UV/FST` texture interpolation.
+
+### N1a: native STQ perspective-correct texturing - CURRENT IMPLEMENTATION
+
+N1a changes only the texture-coordinate consumer contract while preserving the
+real-hardware validated p2trk geometry streams and camera fixture:
+
+```text
+p2trk V3-16 / RGBA8 / V4-16 texel UV
+  -> VIF1
+  -> VU1 ITOF4
+  -> normalize texel UV to ST
+  -> transform
+  -> DIV Q = 1 / clip.w
+  -> S*=Q, T*=Q
+  -> PACKED STQ, RGBAQ, XYZ2
+  -> XGKICK
+  -> GS with FST=0 / PRIM_MAP_ST
+```
+
+The source U/V stream remains compact 12.4 texel-space data. N1a supplies
+per-material texture normalization as VU batch constants. The current resident
+material slot is 64x64; later `p2tex` material descriptors provide dimensions
+without hard-coded renderer constants.
+
+Current PS2SDK's draw3d/VU1 sample is the source contract for STQ: compute
+`Q=1/w`, multiply normalized S/T by Q, and emit ST before RGBAQ so the GS uses
+the correct Q for the vertex.
+
+N1a intentionally keeps conservative VU latency spacing and the existing
+correctness barriers. It is not yet a scheduling optimization.
+
+### N1b: native opaque depth
+
+After N1a hardware validation, opaque track rendering will enable a real GS
+Z-test with a projection/depth convention chosen explicitly for the test method.
+A draw-order-conflicting fixture will verify that visibility is coming from Z,
+not submission order.
+
+### N1c: multi-cluster asynchronous pass
+
+After STQ and Z correctness are isolated, multiple p2trk clusters move into one
+persistent VIF1 ownership chain:
+
+```text
+cluster A REF/UNPACK -> VU1/XGKICK
+cluster B REF/UNPACK -> other TOP/TOPS buffer
+...
+one late opaque-pass retirement fence
+```
+
+This removes the current per-cluster `submit -> wait` behavior and is the first
+whole-pass `submit early, wait late` implementation.
+
+## Current data representation
+
+Static track geometry is already stored in consumer-oriented streams rather than
+runtime game structs:
+
+- signed V3-16 position, 6 bytes/vertex;
+- RGBA8 color, 4 bytes/vertex;
+- V4-16 texcoord transport, with U/V in 12.4 texel space;
+- qword-aligned immutable offsets inside p2trk;
+- material/pass identifiers instead of PS1 GPU packets or OT links.
+
+VIF1 expands streams directly into VU1-local layout. EE does not gather or widen
+static vertices before each draw.
 
 VU1 data memory reserves QW 0..7 for shared constants. VIF1 BASE/OFFSET is
 configured once as 8/496, producing two 496-QW TOP/TOPS regions at QW 8 and
-QW 504. The geometry proof writes its GS-ready output at TOP+64 so input and
-output ownership are explicit inside each region.
-
-The geometry microprogram currently uses a conservative correctness-first
-schedule around ITOF4 and DIV. It is intentionally not presented as an optimal
-VU schedule. Software-pipelined Q handling and overlapping consecutive VIF1
-batches are follow-up A/B tests after the stream is reproduced on hardware.
+QW 504. Current geometry output starts at TOP+96.
 
 ## Build
 
@@ -70,39 +117,22 @@ With `ps2link`/`ps2client` available:
 make -C ps2 run
 ```
 
-## Expected visual result
+## Validation policy
 
-A working build should produce a dark 640x448 display. M0 draws the original
-ready-packet Gouraud triangle. M1 then draws a smaller second triangle whose
-screen-space XYZ2 values were generated by VU1 from signed V3-16 source data.
-Both paths terminate with a GS FINISH event used as a correctness fence.
-
-This expectation has not yet been promoted to a real-hardware result.
-
-## What this is not
-
-This is not yet the full CTR executable. The desktop/native code remains a
-correctness oracle while the PS2 backend is established independently. The
-next renderer milestone is to replace synthetic triangle data with compact
-render-command extraction and real CTR mesh/track batches.
-
-## Required validation
-
-Record at least:
+For each hardware milestone record at least:
 
 - console SCPH/revision;
 - PS2SDK commit;
 - EE toolchain version;
 - build flags;
 - active IRX modules;
-- visible M0 and M1 output correctness;
-- whether both FINISH fences complete without hang;
-- VIF bytes per M1 batch;
-- VU1 input/output QW usage;
-- PCSX2 result as a functional cross-check, not timing evidence.
+- workload / camera / material;
+- correctness result;
+- VIF bytes and VU1 batch count where relevant;
+- PCSX2 result only as a functional cross-check, never as timing authority.
 
-For later batch benchmarks record p50, p95, p99, max and deadline misses rather
-than an average alone.
+For performance work record p50, p95, p99, max and deadline misses, not only an
+average.
 
-Do not promote this proof to a performance claim until it has run on a real
-PlayStation 2.
+The next performance changes happen only after each semantic change is reproduced
+on a real PlayStation 2.
