@@ -26,13 +26,23 @@
  * semantic renderer change is UV/FST -> STQ perspective correction.
  *
  * Input in one TOP/TOPS region:
- *   7..7+N        V3-16 positions
- *   next N        RGBA8
- *   next N        V4-16 source texcoords (12.4 U/V; Z/W ignored by asset)
+ *   0              screen scale + vertex count
+ *   1              screen offset
+ *   2              primitive GIFtag
+ *   3              ST normalization + Q seed
+ *   4              reserved
+ *   5..6           FINISH packet
+ *   7..7+N          V3-16 positions
+ *   next N          RGBA8
+ *   next N          V4-16 source texcoords (12.4 texel U/V)
  * Output starts at TOP+96.
  */
 #define CTRPS2_NATIVE_GEOMETRY_MAX_VERTICES \
     ((CTRPS2_NATIVE_GEOMETRY_OUTPUT_DEST_QW - CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW) / 3u)
+
+/* CURRENT IMPLEMENTATION: native resident material slot 0 is 64x64. */
+#define CTRPS2_NATIVE_TEXTURE_WIDTH   64.0f
+#define CTRPS2_NATIVE_TEXTURE_HEIGHT  64.0f
 
 extern u32 CTRPS2_VU1_NativeTrackStart __attribute__((section(".vudata")));
 extern u32 CTRPS2_VU1_NativeTrackEnd __attribute__((section(".vudata")));
@@ -189,6 +199,19 @@ static void CTRPS2_NativeGeometryBuildHeader(void)
     CTRPS2_NativeGeometryWriteFloat(&s_header[1], 2, z_scale);
 
     /*
+     * p2trk currently stores U/V in 12.4 texel space because that is the
+     * already validated compact transport representation. STQ expects
+     * normalized texture coordinates, so VU1 applies these per-material scale
+     * factors after ITOF4. Slot 0 is 64x64 in N1a. Later p2tex material data
+     * supplies these values instead of compile-time constants.
+     */
+    CTRPS2_NativeGeometryWriteFloat(
+        &s_header[3], 0, 1.0f / CTRPS2_NATIVE_TEXTURE_WIDTH);
+    CTRPS2_NativeGeometryWriteFloat(
+        &s_header[3], 1, 1.0f / CTRPS2_NATIVE_TEXTURE_HEIGHT);
+    CTRPS2_NativeGeometryWriteFloat(&s_header[3], 2, 1.0f);
+
+    /*
      * POTWIERDZONE/current PS2SDK: FST=0 selects floating STQ texture mapping.
      * The VU program emits ST before RGBAQ so GS Q state belongs to this vertex.
      */
@@ -323,7 +346,7 @@ static int CTRPS2_NativeGeometryBuildPacket(void)
 
     /*
      * CURRENT IMPLEMENTATION correctness baseline. The helper's FLUSH+MSCAL
-     * remains until N1b builds a multi-cluster chain and measures the narrower
+     * remains until N1c builds a multi-cluster chain and measures the narrower
      * dependency schedule on real hardware.
      */
     packet2_utils_vu_add_start_program(
