@@ -23,14 +23,23 @@ int CTRPS2_NativeGeometryInit(void);
 int CTRPS2_NativeGeometrySetObjectToScreen(const float matrix[16]);
 
 /*
- * Build one persistent VIF1 chain that REFers directly into a PS2-ready asset.
- * No vertex gather/repack/copy is performed. The source memory must stay alive
- * and unmodified until CTRPS2_NativeGeometryWait() retires the submission.
+ * N1c pass builder.
+ *
+ * Begin allocates one persistent VIF1 DMA chain for the entire pass. Append
+ * records each immutable p2trk batch as REF/UNPACK commands and alternates the
+ * VIF1 TOP/TOPS ownership through MSCAL. End seals the chain. No vertex gather,
+ * packet rebuild or heap allocation happens during subsequent frame submits.
  */
-int CTRPS2_NativeGeometryPrepare(
+int CTRPS2_NativeGeometryPassBegin(u32 batch_count);
+int CTRPS2_NativeGeometryPassAppend(
     const struct CTRPS2NativeGeometryBatch *batch);
+int CTRPS2_NativeGeometryPassEnd(void);
 
-void CTRPS2_NativeGeometrySubmit(void);
-void CTRPS2_NativeGeometryWait(void);
+/*
+ * Submit starts the whole persistent opaque pass. Wait is deliberately separate
+ * so the caller can schedule unrelated EE work before the single late fence.
+ */
+int CTRPS2_NativeGeometryPassSubmit(void);
+void CTRPS2_NativeGeometryPassWait(void);
 
 #endif
