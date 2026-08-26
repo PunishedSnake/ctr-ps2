@@ -27,19 +27,6 @@
 #define CTRPS2_NATIVE_VIF_REUSE_AWARE 0
 #endif
 
-/*
- * Input in one TOP/TOPS region:
- *   0              screen scale + vertex count
- *   1              screen offset
- *   2              primitive GIFtag
- *   3              ST normalization
- *   4              pass control (w = emit final GS FINISH)
- *   5..6           FINISH packet payload, consumed only by final batch
- *   7..7+N          V3-16 positions
- *   next N          RGBA8
- *   next N          V4-16 source texcoords (12.4 texel U/V)
- * Output starts at TOP+96.
- */
 #define CTRPS2_NATIVE_GEOMETRY_MAX_VERTICES \
     ((CTRPS2_NATIVE_GEOMETRY_OUTPUT_DEST_QW - CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW) / 3u)
 
@@ -146,6 +133,7 @@ static int CTRPS2_NativeGeometryBatchValid(
     u32 position_bytes;
     u32 color_bytes;
     u32 uv_bytes;
+    u32 uv_lanes;
 
     if (batch == NULL)
         return 0;
@@ -157,7 +145,8 @@ static int CTRPS2_NativeGeometryBatchValid(
 
     position_bytes = (u32)batch->vertex_count * 3u * sizeof(s16);
     color_bytes = (u32)batch->vertex_count * 4u * sizeof(u8);
-    uv_bytes = (u32)batch->vertex_count * 4u * sizeof(u16);
+    uv_lanes = batch->uv_v2_16 ? 2u : 4u;
+    uv_bytes = (u32)batch->vertex_count * uv_lanes * sizeof(u16);
 
     if (!CTRPS2_NativeGeometryStreamValid(
             batch->positions_v3_16,
@@ -170,7 +159,7 @@ static int CTRPS2_NativeGeometryBatchValid(
             color_bytes))
         return 0;
     if (!CTRPS2_NativeGeometryStreamValid(
-            batch->uvs_v4_16,
+            batch->uvs_16,
             batch->uvs_qwords,
             uv_bytes))
         return 0;
@@ -323,9 +312,12 @@ static void CTRPS2_NativeGeometryAddUVUnpack(
     packet2_t *packet,
     const struct CTRPS2NativeGeometryBatch *batch)
 {
+    enum UnpackType unpack_type =
+        batch->uv_v2_16 ? P2_UNPACK_V2_16 : P2_UNPACK_V4_16;
+
     packet2_chain_ref(
         packet,
-        (void *)batch->uvs_v4_16,
+        (void *)batch->uvs_16,
         batch->uvs_qwords,
         0,
         0,
@@ -333,7 +325,7 @@ static void CTRPS2_NativeGeometryAddUVUnpack(
     packet2_vif_stcycl(packet, 0, 0x0101, 0);
     packet2_vif_open_unpack(
         packet,
-        P2_UNPACK_V4_16,
+        unpack_type,
         CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW +
             ((u32)batch->vertex_count * 2u),
         1,
@@ -347,16 +339,6 @@ static void CTRPS2_NativeGeometryAddLaunch(packet2_t *packet, u32 batch_index)
 {
     int need_path_flush;
 
-    /*
-     * POTWIERDZONE: MSCAL already waits for an active VU program to end.
-     * FLUSH is needed when we also depend on PATH1/PATH2 completion, notably
-     * before overwriting an output buffer still consumed by XGKICK/GIF.
-     *
-     * With two TOP/TOPS buffers, batch N+1 writes a different output region
-     * from batch N. The first same-output reuse happens at N+2. The optional
-     * N1d policy therefore flushes only before even-numbered batches >= 2.
-     * The default N1c build keeps the conservative FLUSH before every MSCAL.
-     */
     need_path_flush = !CTRPS2_NATIVE_VIF_REUSE_AWARE ||
                       (batch_index >= 2u && ((batch_index & 1u) == 0u));
 
