@@ -1,10 +1,9 @@
 ; CTR PS2 native track VU1 program
 ;
-; N1a changes the texture path from affine GS UV/FST to perspective-correct
-; STQ. The p2trk asset keeps the compact 12.4 texel-space U/V transport used by
-; the validated M3/N0 path. Batch constants normalize U/V for STQ before Q is
-; applied, so the runtime asset remains compact while GS receives native 3D
-; texture coordinates.
+; N1a introduced perspective-correct STQ. N1c keeps the same validated vertex
+; consumer contract but allows many p2trk clusters to live in one VIF1 chain.
+; Only the final cluster appends GS FINISH; earlier XGKICK packets terminate at
+; their primitive GIFtag so one late CPU fence represents the whole opaque pass.
 ;
 ; Common VU1 memory (absolute):
 ;   0..3   object-to-screen matrix columns
@@ -14,7 +13,7 @@
 ;   1      screen offset.xyz
 ;   2      primitive GIFtag (PACKED ST, RGBAQ, XYZ2)
 ;   3      st_scale.xy
-;   4      reserved
+;   4      pass control (w != 0 only for final batch)
 ;   5      FINISH GIFtag
 ;   6      FINISH A+D payload
 ;   7..7+N-1       positions expanded from signed V3-16
@@ -24,7 +23,7 @@
 ; Output begins at TOP+96:
 ;   GIFtag
 ;   [packed STQ qword, packed RGBAQ qword, packed XYZ2 qword] * N
-;   FINISH GIFtag + A+D payload
+;   optional final FINISH GIFtag + A+D payload
 ;
 ; POTWIERDZONE by current PS2SDK draw3d/VU1 sample:
 ;   S = normalized_s * Q
@@ -49,6 +48,7 @@ CTRPS2_VU1_NativeTrackStart:
         NOP                             lq          VF13, 1(VI02)
         NOP                             lq          VF06, 2(VI02)
         NOP                             lq          VF12, 3(VI02)
+        NOP                             ilw.w       VI10, 4(VI02)
         NOP                             lq          VF10, 5(VI02)
         NOP                             lq          VF11, 6(VI02)
 
@@ -108,6 +108,16 @@ CTRPS2_VU1_NativeTrackLoop:
         NOP                             ibne        VI03, VI04, CTRPS2_VU1_NativeTrackLoop
         NOP                             NOP
 
+        ; Only the last batch owns the pass-level GS FINISH fence.
+        NOP                             ibne        VI10, VI00, CTRPS2_VU1_NativeTrackEmitFinish
+        NOP                             NOP
+
+CTRPS2_VU1_NativeTrackKick:
+        NOP                             xgkick      VI05
+        NOP[E]                          NOP
+        NOP                             NOP
+
+CTRPS2_VU1_NativeTrackEmitFinish:
         NOP                             sqi         VF10, (VI06++)
         NOP                             sqi         VF11, (VI06++)
         NOP                             xgkick      VI05
