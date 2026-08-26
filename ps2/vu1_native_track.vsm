@@ -13,7 +13,7 @@
 ;   0      scale.xyz + vertex_count.w
 ;   1      screen offset.xyz
 ;   2      primitive GIFtag (PACKED ST, RGBAQ, XYZ2)
-;   3      st_scale.xy + q_seed.z
+;   3      st_scale.xy
 ;   4      reserved
 ;   5      FINISH GIFtag
 ;   6      FINISH A+D payload
@@ -76,7 +76,7 @@ CTRPS2_VU1_NativeTrackLoop:
         NOP                             NOP
         NOP                             NOP
         mul.xy        VF15, VF15, VF12  NOP
-        add.z         VF15, VF00, VF12  NOP
+        addw.z        VF15, VF00, VF00w NOP
 
         mulax         ACC, VF01, VF07x  NOP
         madday        ACC, VF02, VF07y  NOP
