@@ -30,9 +30,6 @@
 #define CTRPS2_NATIVE_GEOMETRY_MAX_VERTICES \
     ((CTRPS2_NATIVE_GEOMETRY_OUTPUT_DEST_QW - CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW) / 3u)
 
-#define CTRPS2_NATIVE_TEXTURE_WIDTH   64.0f
-#define CTRPS2_NATIVE_TEXTURE_HEIGHT  64.0f
-
 #define CTRPS2_NATIVE_DEPTH_NEAR_Z  8.0f
 #define CTRPS2_NATIVE_DEPTH_MAX     65535.0f
 
@@ -142,6 +139,8 @@ static int CTRPS2_NativeGeometryBatchValid(
         return 0;
     if (!batch->textured)
         return 0;
+    if (batch->texture_width == 0 || batch->texture_height == 0)
+        return 0;
 
     position_bytes = (u32)batch->vertex_count * 3u * sizeof(s16);
     color_bytes = (u32)batch->vertex_count * 4u * sizeof(u8);
@@ -193,10 +192,15 @@ static void CTRPS2_NativeGeometryBuildHeader(
         (float)(CTRPS2_GS_ORIGIN_Y + (CTRPS2_FRAME_HEIGHT / 2)));
     CTRPS2_NativeGeometryWriteFloat(&header[1], 2, 0.0f);
 
+    /*
+     * p2trk v2 owns the logical texture dimensions. The reciprocal is computed
+     * once while the persistent pass packet is built, not per frame and never
+     * per vertex. The asset compiler remains free to choose a wider GS TBW.
+     */
     CTRPS2_NativeGeometryWriteFloat(
-        &header[3], 0, 1.0f / CTRPS2_NATIVE_TEXTURE_WIDTH);
+        &header[3], 0, 1.0f / (float)batch->texture_width);
     CTRPS2_NativeGeometryWriteFloat(
-        &header[3], 1, 1.0f / CTRPS2_NATIVE_TEXTURE_HEIGHT);
+        &header[3], 1, 1.0f / (float)batch->texture_height);
     CTRPS2_NativeGeometryWriteFloat(&header[3], 2, 1.0f);
 
     header[4].sw[3] = emit_finish ? 1u : 0u;
@@ -322,6 +326,11 @@ static void CTRPS2_NativeGeometryAddLaunch(packet2_t *packet, u32 batch_index)
 {
     int need_path_flush;
 
+    /*
+     * Default N1c: FLUSH before every MSCAL.
+     * N1d A/B: MSCAL-only while the alternate output is disjoint, FLUSH when
+     * the same TOP/TOPS output region is reused two batches later.
+     */
     need_path_flush = !CTRPS2_NATIVE_VIF_REUSE_AWARE ||
                       (batch_index >= 2u && ((batch_index & 1u) == 0u));
 
