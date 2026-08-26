@@ -186,12 +186,10 @@ static void CTRPS2_NativeGeometryBuildHeader(
     header[0].sw[3] = batch->vertex_count;
 
     CTRPS2_NativeGeometryWriteFloat(
-        &header[1],
-        0,
+        &header[1], 0,
         (float)(CTRPS2_GS_ORIGIN_X + (CTRPS2_FRAME_WIDTH / 2)));
     CTRPS2_NativeGeometryWriteFloat(
-        &header[1],
-        1,
+        &header[1], 1,
         (float)(CTRPS2_GS_ORIGIN_Y + (CTRPS2_FRAME_HEIGHT / 2)));
     CTRPS2_NativeGeometryWriteFloat(&header[1], 2, 0.0f);
 
@@ -270,18 +268,13 @@ static void CTRPS2_NativeGeometryAddPositionUnpack(
         packet,
         (void *)batch->positions_v3_16,
         batch->positions_qwords,
-        0,
-        0,
-        0);
+        0, 0, 0);
     packet2_vif_stcycl(packet, 0, 0x0101, 0);
     packet2_vif_open_unpack(
         packet,
         P2_UNPACK_V3_16,
         CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW,
-        1,
-        1,
-        0,
-        0);
+        1, 1, 0, 0);
     packet2_vif_close_unpack_manual(packet, batch->vertex_count);
 }
 
@@ -293,18 +286,13 @@ static void CTRPS2_NativeGeometryAddColorUnpack(
         packet,
         (void *)batch->colors_rgba8,
         batch->colors_qwords,
-        0,
-        0,
-        0);
+        0, 0, 0);
     packet2_vif_stcycl(packet, 0, 0x0101, 0);
     packet2_vif_open_unpack(
         packet,
         P2_UNPACK_V4_8,
         CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW + batch->vertex_count,
-        1,
-        0,
-        1,
-        0);
+        1, 0, 1, 0);
     packet2_vif_close_unpack_manual(packet, batch->vertex_count);
 }
 
@@ -312,26 +300,21 @@ static void CTRPS2_NativeGeometryAddUVUnpack(
     packet2_t *packet,
     const struct CTRPS2NativeGeometryBatch *batch)
 {
-    enum UnpackType unpack_type =
+    enum UnpackMode unpack_mode =
         batch->uv_v2_16 ? P2_UNPACK_V2_16 : P2_UNPACK_V4_16;
 
     packet2_chain_ref(
         packet,
         (void *)batch->uvs_16,
         batch->uvs_qwords,
-        0,
-        0,
-        0);
+        0, 0, 0);
     packet2_vif_stcycl(packet, 0, 0x0101, 0);
     packet2_vif_open_unpack(
         packet,
-        unpack_type,
+        unpack_mode,
         CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW +
             ((u32)batch->vertex_count * 2u),
-        1,
-        0,
-        1,
-        0);
+        1, 0, 1, 0);
     packet2_vif_close_unpack_manual(packet, batch->vertex_count);
 }
 
