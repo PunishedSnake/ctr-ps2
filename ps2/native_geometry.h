@@ -15,6 +15,8 @@ struct CTRPS2NativeGeometryBatch
     u16 uvs_qwords;
 
     u16 vertex_count;
+    u16 texture_width;
+    u16 texture_height;
     u8 gs_primitive;
     u8 textured;
     u8 uv_v2_16;
