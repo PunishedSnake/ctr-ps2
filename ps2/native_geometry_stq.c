@@ -20,15 +20,12 @@
 #define CTRPS2_NATIVE_GEOMETRY_PACKED_REGLIST \
     (((u64)GIF_REG_ST) | ((u64)GIF_REG_RGBAQ << 4) | ((u64)GIF_REG_XYZ2 << 8))
 
-/*
- * Conservative packet capacity for one batch inside the persistent N1c VIF1
- * chain. This includes the inline 7-QW header, VIF state CNT tags, three REF
- * streams and the FLUSH+MSCAL launch tag. The final packet size is checked by
- * packet2's own cursor through this preallocated buffer; later profiling can
- * replace this deliberately roomy bound with a tighter arena planner.
- */
 #define CTRPS2_NATIVE_GEOMETRY_PACKET_BASE_QWORDS       8u
 #define CTRPS2_NATIVE_GEOMETRY_PACKET_QWORDS_PER_BATCH 48u
+
+#ifndef CTRPS2_NATIVE_VIF_REUSE_AWARE
+#define CTRPS2_NATIVE_VIF_REUSE_AWARE 0
+#endif
 
 /*
  * Input in one TOP/TOPS region:
@@ -46,15 +43,9 @@
 #define CTRPS2_NATIVE_GEOMETRY_MAX_VERTICES \
     ((CTRPS2_NATIVE_GEOMETRY_OUTPUT_DEST_QW - CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW) / 3u)
 
-/* CURRENT IMPLEMENTATION: native resident material slot 0 is 64x64. */
 #define CTRPS2_NATIVE_TEXTURE_WIDTH   64.0f
 #define CTRPS2_NATIVE_TEXTURE_HEIGHT  64.0f
 
-/*
- * N1b/N1c fixture depth contract.
- * clip.z=1, clip.w=view_z => post-divide depth=1/view_z.
- * GEQUAL therefore keeps the nearer sample. FTOI4 contributes the final x16.
- */
 #define CTRPS2_NATIVE_DEPTH_NEAR_Z  8.0f
 #define CTRPS2_NATIVE_DEPTH_MAX     65535.0f
 
@@ -221,7 +212,6 @@ static void CTRPS2_NativeGeometryBuildHeader(
         &header[3], 1, 1.0f / CTRPS2_NATIVE_TEXTURE_HEIGHT);
     CTRPS2_NativeGeometryWriteFloat(&header[3], 2, 1.0f);
 
-    /* VU1 reads header[4].w to decide whether this batch owns the pass fence. */
     header[4].sw[3] = emit_finish ? 1u : 0u;
 
     prim = GS_SET_PRIM(
@@ -235,10 +225,6 @@ static void CTRPS2_NativeGeometryBuildHeader(
         0,
         PRIM_UNFIXED);
 
-    /*
-     * Non-final XGKICK packets end at the primitive GIFtag. The final batch
-     * keeps EOP clear so the appended FINISH packet becomes the only pass fence.
-     */
     header[2].dw[0] = VU_GS_GIFTAG(
         batch->vertex_count,
         emit_finish ? 0 : 1,
@@ -357,6 +343,30 @@ static void CTRPS2_NativeGeometryAddUVUnpack(
     packet2_vif_close_unpack_manual(packet, batch->vertex_count);
 }
 
+static void CTRPS2_NativeGeometryAddLaunch(packet2_t *packet, u32 batch_index)
+{
+    int need_path_flush;
+
+    /*
+     * POTWIERDZONE: MSCAL already waits for an active VU program to end.
+     * FLUSH is needed when we also depend on PATH1/PATH2 completion, notably
+     * before overwriting an output buffer still consumed by XGKICK/GIF.
+     *
+     * With two TOP/TOPS buffers, batch N+1 writes a different output region
+     * from batch N. The first same-output reuse happens at N+2. The optional
+     * N1d policy therefore flushes only before even-numbered batches >= 2.
+     * The default N1c build keeps the conservative FLUSH before every MSCAL.
+     */
+    need_path_flush = !CTRPS2_NATIVE_VIF_REUSE_AWARE ||
+                      (batch_index >= 2u && ((batch_index & 1u) == 0u));
+
+    packet2_chain_open_cnt(packet, 0, 0, 0);
+    if (need_path_flush)
+        packet2_vif_flush(packet, 0);
+    packet2_vif_mscal(packet, CTRPS2_NATIVE_GEOMETRY_PROGRAM_ADDR, 0);
+    packet2_chain_close_tag(packet);
+}
+
 int CTRPS2_NativeGeometryInit(void)
 {
     if (!CTRPS2_NativeGeometryUploadProgram())
@@ -434,18 +444,7 @@ int CTRPS2_NativeGeometryPassAppend(
     CTRPS2_NativeGeometryAddPositionUnpack(s_vifPacket, batch);
     CTRPS2_NativeGeometryAddColorUnpack(s_vifPacket, batch);
     CTRPS2_NativeGeometryAddUVUnpack(s_vifPacket, batch);
-
-    /*
-     * CURRENT IMPLEMENTATION / correctness baseline:
-     * packet2's helper emits FLUSH+MSCAL for each batch. This still allows VIF1
-     * to fill the alternate TOPS input buffer while VU1 consumes the current
-     * TOP buffer, but it deliberately retires the previous VU/GIF dependency
-     * before reusing a buffer two batches later. N1d will A/B narrower barriers
-     * only after this ownership model is reproduced on real hardware.
-     */
-    packet2_utils_vu_add_start_program(
-        s_vifPacket,
-        CTRPS2_NATIVE_GEOMETRY_PROGRAM_ADDR);
+    CTRPS2_NativeGeometryAddLaunch(s_vifPacket, s_appendedBatches);
 
     s_appendedBatches++;
     return 1;
@@ -468,11 +467,6 @@ int CTRPS2_NativeGeometryPassSubmit(void)
     if (!s_initialized || !s_passReady || s_vifPacket == NULL || s_submitted)
         return 0;
 
-    /*
-     * The persistent chain REFers into immutable p2trk streams. Broad cache
-     * flush remains the current PS2SDK correctness baseline for source-chained
-     * REF data; immutable asset cache policy is a later measured optimization.
-     */
     dma_channel_send_packet2(s_vifPacket, DMA_CHANNEL_VIF1, 1);
     s_submitted = 1;
     return 1;
