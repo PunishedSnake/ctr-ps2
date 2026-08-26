@@ -6,10 +6,6 @@
 #define CTRPS2_NATIVE_FIXTURE_CLUSTER_COUNT 4u
 #define CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT  4u
 
-/*
- * Four vertices are 24 source bytes for V3-16. Keep each cluster position
- * stream padded to two qwords so every REF begins on a 16-byte boundary.
- */
 struct CTRPS2NativeFixturePositions
 {
     s16 data[16];
@@ -20,9 +16,10 @@ struct CTRPS2NativeFixtureColors
     u8 data[CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT * 4u];
 } __attribute__((aligned(16)));
 
+/* N2a: only U/V are transported. VIF expands V2-16 to one VU qword/vertex. */
 struct CTRPS2NativeFixtureUVs
 {
-    u16 data[CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT * 4u];
+    u16 data[CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT * 2u];
 } __attribute__((aligned(16)));
 
 struct CTRPS2NativeTrackFixtureBlob
@@ -58,6 +55,8 @@ _Static_assert((sizeof(struct CTRPS2NativeFixtureColors) & 15u) == 0,
                "native color stream must be qword padded");
 _Static_assert((sizeof(struct CTRPS2NativeFixtureUVs) & 15u) == 0,
                "native UV stream must be qword padded");
+_Static_assert(sizeof(struct CTRPS2NativeFixtureUVs) == 16u,
+               "four V2-16 UVs should occupy exactly one source qword");
 _Static_assert((offsetof(struct CTRPS2NativeTrackFixtureBlob, positions) & 15u) == 0,
                "native position stream base must be DMA aligned");
 _Static_assert((offsetof(struct CTRPS2NativeTrackFixtureBlob, colors) & 15u) == 0,
@@ -65,19 +64,6 @@ _Static_assert((offsetof(struct CTRPS2NativeTrackFixtureBlob, colors) & 15u) == 
 _Static_assert((offsetof(struct CTRPS2NativeTrackFixtureBlob, uvs) & 15u) == 0,
                "native UV stream base must be DMA aligned");
 
-/*
- * N1c fixture: four independent p2trk clusters rather than one stitched strip.
- *
- * Cluster 0: near, red quadrant.
- * Cluster 1: farther, blue quadrant, emitted after cluster 0 and overlapping it.
- * Cluster 2/3: independent full-texture perspective references.
- *
- * This simultaneously validates:
- *   - N1b GEQUAL reversed depth across cluster boundaries;
- *   - VIF1 BASE/OFFSET TOP/TOPS alternation;
- *   - four MSCAL/XGKICK jobs in one persistent DMA chain;
- *   - one final pass-level GS FINISH.
- */
 static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
     __attribute__((aligned(64))) = {
     .header = {
@@ -103,7 +89,7 @@ static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
             .material_index = 0,
             .vertex_count = CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT,
             .gs_primitive = 0x04,
-            .flags = 0,
+            .flags = CTRPS2_P2TRK_CLUSTER_UV_V2_16,
             .reserved0 = 0,
             .positions_offset = CTRPS2_NATIVE_POS_OFFSET(0),
             .positions_qwords = CTRPS2_NATIVE_POS_QWORDS,
@@ -122,7 +108,7 @@ static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
             .material_index = 0,
             .vertex_count = CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT,
             .gs_primitive = 0x04,
-            .flags = 0,
+            .flags = CTRPS2_P2TRK_CLUSTER_UV_V2_16,
             .reserved0 = 0,
             .positions_offset = CTRPS2_NATIVE_POS_OFFSET(1),
             .positions_qwords = CTRPS2_NATIVE_POS_QWORDS,
@@ -141,7 +127,7 @@ static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
             .material_index = 0,
             .vertex_count = CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT,
             .gs_primitive = 0x04,
-            .flags = 0,
+            .flags = CTRPS2_P2TRK_CLUSTER_UV_V2_16,
             .reserved0 = 0,
             .positions_offset = CTRPS2_NATIVE_POS_OFFSET(2),
             .positions_qwords = CTRPS2_NATIVE_POS_QWORDS,
@@ -160,7 +146,7 @@ static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
             .material_index = 0,
             .vertex_count = CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT,
             .gs_primitive = 0x04,
-            .flags = 0,
+            .flags = CTRPS2_P2TRK_CLUSTER_UV_V2_16,
             .reserved0 = 0,
             .positions_offset = CTRPS2_NATIVE_POS_OFFSET(3),
             .positions_qwords = CTRPS2_NATIVE_POS_QWORDS,
@@ -214,20 +200,20 @@ static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
     },
     .uvs = {
         { .data = {
-              8,   8,0,0,  504,   8,0,0,
-              8, 504,0,0,  504, 504,0,0,
+              8,   8,  504,   8,
+              8, 504,  504, 504,
         } },
         { .data = {
-              8, 520,0,0,  504, 520,0,0,
-              8,1016,0,0,  504,1016,0,0,
+              8, 520,  504, 520,
+              8,1016,  504,1016,
         } },
         { .data = {
-              8,   8,0,0, 1016,   8,0,0,
-              8,1016,0,0, 1016,1016,0,0,
+              8,   8, 1016,   8,
+              8,1016, 1016,1016,
         } },
         { .data = {
-              8,   8,0,0, 1016,   8,0,0,
-              8,1016,0,0, 1016,1016,0,0,
+              8,   8, 1016,   8,
+              8,1016, 1016,1016,
         } },
     },
 };
