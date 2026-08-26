@@ -105,6 +105,7 @@ int CTRPS2_P2TrkGetCluster(
     u32 position_bytes;
     u32 color_bytes;
     u32 uv_bytes;
+    u32 uv_lanes;
 
     if (out == NULL || track == NULL || track->header == NULL)
         return 0;
@@ -116,6 +117,8 @@ int CTRPS2_P2TrkGetCluster(
         return 0;
     if (cluster->material_index >= track->header->material_count)
         return 0;
+    if ((cluster->flags & ~CTRPS2_P2TRK_CLUSTER_UV_V2_16) != 0)
+        return 0;
 
     material = &track->materials[cluster->material_index];
     if (material->pass > CTRPS2_P2TRK_PASS_ADDITIVE)
@@ -123,8 +126,10 @@ int CTRPS2_P2TrkGetCluster(
 
     position_bytes = (u32)cluster->vertex_count * 3u * sizeof(s16);
     color_bytes = (u32)cluster->vertex_count * 4u * sizeof(u8);
+
+    uv_lanes = (cluster->flags & CTRPS2_P2TRK_CLUSTER_UV_V2_16) ? 2u : 4u;
     uv_bytes = (material->flags & CTRPS2_P2TRK_MATERIAL_TEXTURED)
-                   ? ((u32)cluster->vertex_count * 4u * sizeof(u16))
+                   ? ((u32)cluster->vertex_count * uv_lanes * sizeof(u16))
                    : 0u;
 
     if (!CTRPS2_P2TrkStreamIsValid(
