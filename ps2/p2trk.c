@@ -46,6 +46,25 @@ static int CTRPS2_P2TrkStreamIsValid(
     return (((uintptr_t)ptr & (CTRPS2_P2TRK_STREAM_ALIGNMENT - 1u)) == 0);
 }
 
+static int CTRPS2_P2TrkMaterialIsValid(
+    const struct CTRPS2P2TrkMaterial *material)
+{
+    if (material->pass > CTRPS2_P2TRK_PASS_ADDITIVE)
+        return 0;
+
+    if (material->flags & CTRPS2_P2TRK_MATERIAL_TEXTURED)
+    {
+        if (material->texture_width == 0 || material->texture_height == 0)
+            return 0;
+    }
+    else if (material->texture_width != 0 || material->texture_height != 0)
+    {
+        return 0;
+    }
+
+    return 1;
+}
+
 int CTRPS2_P2TrkOpen(
     struct CTRPS2P2TrkView *out,
     const void *data,
@@ -54,6 +73,7 @@ int CTRPS2_P2TrkOpen(
     const struct CTRPS2P2TrkHeader *header;
     u32 material_bytes;
     u32 cluster_bytes;
+    u32 material_index;
 
     if (out == NULL || data == NULL)
         return 0;
@@ -92,6 +112,13 @@ int CTRPS2_P2TrkOpen(
     out->header = header;
     out->materials = (const struct CTRPS2P2TrkMaterial *)(out->base + header->materials_offset);
     out->clusters = (const struct CTRPS2P2TrkCluster *)(out->base + header->clusters_offset);
+
+    for (material_index = 0; material_index < header->material_count; ++material_index)
+    {
+        if (!CTRPS2_P2TrkMaterialIsValid(&out->materials[material_index]))
+            return 0;
+    }
+
     return 1;
 }
 
@@ -121,8 +148,6 @@ int CTRPS2_P2TrkGetCluster(
         return 0;
 
     material = &track->materials[cluster->material_index];
-    if (material->pass > CTRPS2_P2TRK_PASS_ADDITIVE)
-        return 0;
 
     position_bytes = (u32)cluster->vertex_count * 3u * sizeof(s16);
     color_bytes = (u32)cluster->vertex_count * 4u * sizeof(u8);
@@ -156,6 +181,6 @@ int CTRPS2_P2TrkGetCluster(
     out->material = material;
     out->positions_v3_16 = track->base + cluster->positions_offset;
     out->colors_rgba8 = track->base + cluster->colors_offset;
-    out->uvs_v4_16 = uv_bytes ? (track->base + cluster->uvs_offset) : NULL;
+    out->uvs_16 = uv_bytes ? (track->base + cluster->uvs_offset) : NULL;
     return 1;
 }
