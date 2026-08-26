@@ -22,6 +22,12 @@ enum CTRPS2P2TrkMaterialFlags
     CTRPS2_P2TRK_MATERIAL_DOUBLE_SIDED = 1u << 1,
 };
 
+enum CTRPS2P2TrkClusterFlags
+{
+    /* U/V stream stores only two unsigned 16-bit lanes per vertex. */
+    CTRPS2_P2TRK_CLUSTER_UV_V2_16 = 1u << 0,
+};
+
 struct CTRPS2P2TrkHeader
 {
     u32 magic;
