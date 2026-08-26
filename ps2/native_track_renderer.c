@@ -37,9 +37,11 @@ static int CTRPS2_NativeTrackRendererBuildBatch(
     batch->positions_qwords = view.cluster->positions_qwords;
     batch->colors_rgba8 = view.colors_rgba8;
     batch->colors_qwords = view.cluster->colors_qwords;
-    batch->uvs_16 = view.uvs_v4_16;
+    batch->uvs_16 = view.uvs_16;
     batch->uvs_qwords = view.cluster->uvs_qwords;
     batch->vertex_count = view.cluster->vertex_count;
+    batch->texture_width = view.material->texture_width;
+    batch->texture_height = view.material->texture_height;
     batch->gs_primitive = view.cluster->gs_primitive;
     batch->textured = 1;
     batch->uv_v2_16 =
