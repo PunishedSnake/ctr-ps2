@@ -9,21 +9,22 @@ static struct CTRPS2P2TrkView s_track;
 static int s_initialized;
 
 /*
- * First native camera/projection contract.
+ * N1b prototype camera/projection contract.
  * Column-major matrix consumed directly by the VU1 microprogram:
- *   clip.x = 1.15 * x
+ *   clip.x =  1.15 * x
  *   clip.y = -1.45 * y
- *   clip.z = z - 1
- *   clip.w = z
+ *   clip.z =  1
+ *   clip.w =  z
  *
- * This deliberately proves real perspective division in the native path. It is
- * a fixed prototype camera, not the final CTR camera transform.
+ * After perspective division depth is 1/z. The geometry header maps that into
+ * a positive 16-bit reversed depth range so GS GEQUAL means "nearer wins".
+ * This remains a fixed fixture camera, not the final CTR camera transform.
  */
 static const float s_nativeObjectToScreen[16] __attribute__((aligned(64))) = {
     1.15f,  0.00f, 0.0f, 0.0f,
     0.00f, -1.45f, 0.0f, 0.0f,
-    0.00f,  0.00f, 1.0f, 1.0f,
-    0.00f,  0.00f,-1.0f, 0.0f,
+    0.00f,  0.00f, 0.0f, 1.0f,
+    0.00f,  0.00f, 1.0f, 0.0f,
 };
 
 int CTRPS2_NativeTrackRendererInit(const void *track_data, u32 track_bytes)
@@ -60,7 +61,7 @@ int CTRPS2_NativeTrackRendererDraw(void)
             return 0;
 
         /*
-         * Native milestone N0 supports the first shipping pass only:
+         * Native N1 supports the first shipping pass only:
          * opaque, textured static geometry using resident texture slot 0.
          * Other passes become explicit renderer paths instead of PS1 packet
          * flags leaking into this command stream.
@@ -89,7 +90,7 @@ int CTRPS2_NativeTrackRendererDraw(void)
         CTRPS2_NativeGeometrySubmit();
 
         /*
-         * CURRENT IMPLEMENTATION correctness baseline. N1 replaces this
+         * CURRENT IMPLEMENTATION correctness baseline. N1c replaces this
          * per-cluster retirement with command arenas and late frame/pass waits.
          */
         CTRPS2_NativeGeometryWait();
