@@ -1,14 +1,14 @@
-#include "ctr_level_bridge.h"
-#include "geometry_bench.h"
-#include "renderer_ps2.h"
+#include "native_renderer.h"
+#include "native_track_fixture.h"
+#include "native_track_renderer.h"
 
 #include <kernel.h>
 
 static void CTRPS2_FailAfterRenderer(u8 r, u8 g, u8 b)
 {
-    CTRPS2_RendererClear(r, g, b);
+    CTRPS2_NativeRendererClear(r, g, b);
     for (;;)
-        CTRPS2_RendererPresent();
+        CTRPS2_NativeRendererPresent();
 }
 
 int main(int argc, char *argv[])
@@ -16,30 +16,29 @@ int main(int argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    if (!CTRPS2_RendererInit())
+    if (!CTRPS2_NativeRendererInit())
     {
         SleepThread();
         return 1;
     }
 
-    /* Upload only the M3 geometry microprogram and shared transform matrix. */
-    if (!CTRPS2_GeometryBenchInit())
+    /*
+     * Native N0: default runtime no longer constructs PS1 primitives, traverses
+     * QuadBlock render fields or decodes TextureLayout/VRM. It opens one p2trk
+     * memory image whose streams are already VIF-ready and DMA aligned.
+     */
+    if (!CTRPS2_NativeTrackRendererInit(
+            CTRPS2_NativeTrackFixtureData(),
+            CTRPS2_NativeTrackFixtureBytes()))
         CTRPS2_FailAfterRenderer(72, 12, 12);
 
-    CTRPS2_RendererClear(10, 14, 24);
+    CTRPS2_NativeRendererClear(8, 12, 22);
 
-    /*
-     * M3a: preserve the real-hardware validated 22-vertex QuadBlock strip, add
-     * packed UV through VIF1/VU1, and sample one resident asymmetric 64x64 GS
-     * texture on each of the four ordinary high-LOD faces. This proves the PS2
-     * texture transport/state/attribute path before retail CTR texture conversion
-     * and uv_rotation semantics are allowed onto the critical path.
-     */
-    if (!CTRPS2_LevelBridgeBenchRun())
+    if (!CTRPS2_NativeTrackRendererDraw())
         CTRPS2_FailAfterRenderer(72, 12, 72);
 
     for (;;)
-        CTRPS2_RendererPresent();
+        CTRPS2_NativeRendererPresent();
 
     return 0;
 }
