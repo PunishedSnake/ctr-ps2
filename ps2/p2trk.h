@@ -4,7 +4,7 @@
 #include <tamtypes.h>
 
 #define CTRPS2_P2TRK_MAGIC   0x4b543250u /* 'P2TK' little-endian */
-#define CTRPS2_P2TRK_VERSION 1u
+#define CTRPS2_P2TRK_VERSION 2u
 
 #define CTRPS2_P2TRK_STREAM_ALIGNMENT 16u
 
@@ -24,7 +24,6 @@ enum CTRPS2P2TrkMaterialFlags
 
 enum CTRPS2P2TrkClusterFlags
 {
-    /* U/V stream stores only two unsigned 16-bit lanes per vertex. */
     CTRPS2_P2TRK_CLUSTER_UV_V2_16 = 1u << 0,
 };
 
@@ -43,13 +42,22 @@ struct CTRPS2P2TrkHeader
     u32 reserved[2];
 };
 
+/*
+ * v2 material descriptor keeps texture normalization with the producer data.
+ * Dimensions are logical texel dimensions, not GS TBW allocation width.
+ * The native pass builder converts them to reciprocal ST scale once when the
+ * immutable command chain is built. No per-vertex or per-frame divide remains.
+ */
 struct CTRPS2P2TrkMaterial
 {
     u16 texture_id;
     u8 pass;
     u8 flags;
     u32 state_key;
-    u32 reserved[2];
+    u16 texture_width;
+    u16 texture_height;
+    u16 reserved0;
+    u16 reserved1;
 };
 
 struct CTRPS2P2TrkCluster
@@ -92,7 +100,7 @@ struct CTRPS2P2TrkClusterView
     const struct CTRPS2P2TrkMaterial *material;
     const void *positions_v3_16;
     const void *colors_rgba8;
-    const void *uvs_v4_16;
+    const void *uvs_16;
 };
 
 int CTRPS2_P2TrkOpen(
