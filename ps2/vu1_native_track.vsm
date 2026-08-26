@@ -1,9 +1,10 @@
 ; CTR PS2 native track VU1 program
 ;
 ; N1a changes the texture path from affine GS UV/FST to perspective-correct
-; STQ. The input asset still stores U/V in GS 12.4 fixed-point form for now;
-; VU1 converts those two lanes with ITOF4, builds a Q seed of 1.0, then
-; multiplies S/T/Q by the perspective reciprocal before XGKICK.
+; STQ. The p2trk asset keeps the compact 12.4 texel-space U/V transport used by
+; the validated M3/N0 path. Batch constants normalize U/V for STQ before Q is
+; applied, so the runtime asset remains compact while GS receives native 3D
+; texture coordinates.
 ;
 ; Common VU1 memory (absolute):
 ;   0..3   object-to-screen matrix columns
@@ -12,7 +13,8 @@
 ;   0      scale.xyz + vertex_count.w
 ;   1      screen offset.xyz
 ;   2      primitive GIFtag (PACKED ST, RGBAQ, XYZ2)
-;   3..4   reserved
+;   3      st_scale.xy + q_seed.z
+;   4      reserved
 ;   5      FINISH GIFtag
 ;   6      FINISH A+D payload
 ;   7..7+N-1       positions expanded from signed V3-16
@@ -25,8 +27,8 @@
 ;   FINISH GIFtag + A+D payload
 ;
 ; POTWIERDZONE by current PS2SDK draw3d/VU1 sample:
-;   S = source_s * Q
-;   T = source_t * Q
+;   S = normalized_s * Q
+;   T = normalized_t * Q
 ;   Q = 1 / clip_w
 ; and ST must precede RGBAQ so the GS perspective Q is current when RGBAQ is
 ; consumed.
@@ -46,6 +48,7 @@ CTRPS2_VU1_NativeTrackStart:
         NOP                             lq          VF05, 0(VI02)
         NOP                             lq          VF13, 1(VI02)
         NOP                             lq          VF06, 2(VI02)
+        NOP                             lq          VF12, 3(VI02)
         NOP                             lq          VF10, 5(VI02)
         NOP                             lq          VF11, 6(VI02)
 
@@ -68,9 +71,12 @@ CTRPS2_VU1_NativeTrackLoop:
 
         itof4.xyz     VF07, VF07        NOP
         itof4.xy      VF15, VF15        NOP
-        addw.z        VF15, VF00, VF00w NOP
         NOP                             NOP
         NOP                             NOP
+        NOP                             NOP
+        NOP                             NOP
+        mul.xy        VF15, VF15, VF12  NOP
+        add.z         VF15, VF00, VF12  NOP
 
         mulax         ACC, VF01, VF07x  NOP
         madday        ACC, VF02, VF07y  NOP
