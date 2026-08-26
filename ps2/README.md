@@ -24,13 +24,12 @@ The N0 executable does not link the old `ctr_level_bridge`, PS1 VRAM decoder,
 `TextureLayout` packer, or desktop renderer. Those remain only as importer and
 correctness-oracle research in the repository.
 
-N0 uses native PSMT4 + GS CLUT residency and a fixed prototype 3D camera. Its
-remaining intentional limitation is affine `UV/FST` texture interpolation.
+N0 uses native PSMT4 + GS CLUT residency and a fixed prototype 3D camera.
 
 ### N1a: native STQ perspective-correct texturing - CURRENT IMPLEMENTATION
 
 N1a changes only the texture-coordinate consumer contract while preserving the
-real-hardware validated p2trk geometry streams and camera fixture:
+real-hardware validated p2trk geometry streams:
 
 ```text
 p2trk V3-16 / RGBA8 / V4-16 texel UV
@@ -57,27 +56,62 @@ the correct Q for the vertex.
 N1a intentionally keeps conservative VU latency spacing and the existing
 correctness barriers. It is not yet a scheduling optimization.
 
-### N1b: native opaque depth
+### N1b: reversed opaque depth - CURRENT IMPLEMENTATION, hardware checkpoint pending
 
-After N1a hardware validation, opaque track rendering will enable a real GS
-Z-test with a projection/depth convention chosen explicitly for the test method.
-A draw-order-conflicting fixture will verify that visibility is coming from Z,
-not submission order.
+N1b enables the GS Z-buffer for the opaque native track pass instead of keeping
+an allocated but ALLPASS depth surface.
+
+The current fixture camera emits:
+
+```text
+clip.x =  1.15 * x
+clip.y = -1.45 * y
+clip.z =  1
+clip.w =  z
+```
+
+so post-divide depth is `1/z`. The VU1 screen transform maps the fixture near
+plane (`z=8`) to `0xffff` before XYZ2 emission and leaves farther geometry with
+smaller positive Z. The GS is configured for `ZTEST_METHOD_GREATER_EQUAL`,
+therefore nearer opaque geometry must win even when it was submitted earlier.
+
+Frame clear deliberately uses the current PS2SDK `draw_disable_tests()` +
+`draw_clear()` + `draw_enable_tests()` contract: the clear rectangle writes
+Z=0 with ALLPASS, then GEQUAL is restored for geometry.
+
+The fixture contains an adversarial overlap:
+
+```text
+near red-quadrant face  -> submitted first
+far blue-quadrant face  -> submitted second over nearly the same pixels
+```
+
+Expected hardware result: the overlapping region remains the near red texture.
+If blue replaces it, the reversed-depth contract has failed. The two lower faces
+remain independent STQ/perspective references.
+
+The fixed `z=8` scaling belongs only to this N1b fixture. Production camera
+near/far and the final Z16/Z24 choice remain explicit renderer policy and must be
+benchmarked against VRAM pressure and precision.
 
 ### N1c: multi-cluster asynchronous pass
 
-After STQ and Z correctness are isolated, multiple p2trk clusters move into one
-persistent VIF1 ownership chain:
+N1c begins only after N1b reproduces correctly on real hardware. Multiple p2trk
+clusters then move into one persistent VIF1 ownership chain:
 
 ```text
-cluster A REF/UNPACK -> VU1/XGKICK
-cluster B REF/UNPACK -> other TOP/TOPS buffer
+cluster A REF/UNPACK -> TOP A -> VU1/XGKICK
+cluster B REF/UNPACK -> TOP B while VU1 consumes A
+cluster C ...
 ...
 one late opaque-pass retirement fence
 ```
 
 This removes the current per-cluster `submit -> wait` behavior and is the first
-whole-pass `submit early, wait late` implementation.
+whole-pass `submit early, wait late` implementation. BASE/OFFSET/TOPS already
+provide the input double-buffer mechanism; output ownership and FINISH placement
+remain separate correctness constraints rather than being hand-waved into a
+single global wait.
 
 ## Current data representation
 
@@ -130,6 +164,9 @@ For each hardware milestone record at least:
 - correctness result;
 - VIF bytes and VU1 batch count where relevant;
 - PCSX2 result only as a functional cross-check, never as timing authority.
+
+For N1b specifically record whether the near red overlap survives the farther
+blue submission and whether any Z fighting, unexpected clipping or wrap appears.
 
 For performance work record p50, p95, p99, max and deadline misses, not only an
 average.
