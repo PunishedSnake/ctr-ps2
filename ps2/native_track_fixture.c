@@ -51,13 +51,22 @@ _Static_assert((offsetof(struct CTRPS2NativeTrackFixtureBlob, uvs) & 15u) == 0,
                "native UV stream offset must be DMA aligned");
 
 /*
- * First true PS2-owned static cluster.
+ * N1b adversarial depth fixture.
  *
- * This is deliberately not built from QuadBlock/LevVertex at runtime. The 22
- * vertices are already arranged as one GS triangle strip with degenerate
- * connectors between four textured faces. Z increases toward the lower row so
- * the native perspective matrix produces visible depth instead of another flat
- * compatibility rectangle.
+ * The stream is still one GS triangle strip with degenerate connectors, but the
+ * first two faces deliberately overlap in projected screen space:
+ *
+ *   face A: near, samples the red texture quadrant, emitted first
+ *   face B: far,  samples the blue texture quadrant, emitted second
+ *
+ * B is scaled in object X/Y approximately with its larger Z so both faces cover
+ * nearly the same pixels after perspective division. With Z disabled the later
+ * blue face wins. With the N1b reversed-depth GEQUAL contract the earlier near
+ * red face must remain visible. The lower two faces remain independent STQ /
+ * perspective references.
+ *
+ * No QuadBlock/LevVertex data is constructed at runtime; this remains a compact
+ * p2trk-owned VIF-ready transport fixture.
  */
 static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
     __attribute__((aligned(64))) = {
@@ -94,15 +103,19 @@ static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
         .uvs_offset = offsetof(struct CTRPS2NativeTrackFixtureBlob, uvs),
         .uvs_qwords = CTRPS2_NATIVE_UV_QWORDS,
         .reserved3 = 0,
-        .bounds_min = {-6, -4, 10},
-        .bounds_max = {6, 4, 18},
+        .bounds_min = {-11, -7, 10},
+        .bounds_max = {6, 4, 20},
         .reserved4 = 0,
     },
     .positions = {
         .data = {
+            /* Face A: near. */
             -6, -4, 10,   0, -4, 10,  -6,  0, 12,   0,  0, 12,
-             0,  0, 12,   0, -4, 10,   0, -4, 10,   6, -4, 11,   0,  0, 12,   6,  0, 13,
-             6,  0, 13,  -6,  0, 12,  -6,  0, 12,   0,  0, 12,  -5,  4, 17,   0,  4, 17,
+            /* Degenerate A -> B and face B: farther, emitted after A. */
+             0,  0, 12, -11, -7, 18, -11, -7, 18,   0, -7, 18, -10,  0, 20,   0,  0, 20,
+            /* Degenerate B -> C and lower-left reference face. */
+             0,  0, 20,  -6,  0, 12,  -6,  0, 12,   0,  0, 12,  -5,  4, 17,   0,  4, 17,
+            /* Degenerate C -> D and lower-right reference face. */
              0,  4, 17,   0,  0, 12,   0,  0, 12,   6,  0, 13,   0,  4, 17,   5,  4, 18,
         },
     },
@@ -123,9 +136,13 @@ static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
     },
     .uvs = {
         .data = {
-               8,   8,0,0, 1016,   8,0,0,    8,1016,0,0, 1016,1016,0,0,
-            1016,1016,0,0,    8,   8,0,0,    8,   8,0,0, 1016,   8,0,0,    8,1016,0,0, 1016,1016,0,0,
-            1016,1016,0,0,    8,   8,0,0,    8,   8,0,0, 1016,   8,0,0,    8,1016,0,0, 1016,1016,0,0,
+            /* Face A: top-left red quadrant, texel centers 0.5..31.5. */
+               8,   8,0,0,  504,   8,0,0,    8, 504,0,0,  504, 504,0,0,
+            /* Connector + face B: bottom-left blue quadrant. */
+             504, 504,0,0,    8, 520,0,0,    8, 520,0,0,  504, 520,0,0,    8,1016,0,0,  504,1016,0,0,
+            /* Connector + lower-left reference: full texture. */
+             504,1016,0,0,    8,   8,0,0,    8,   8,0,0, 1016,   8,0,0,    8,1016,0,0, 1016,1016,0,0,
+            /* Connector + lower-right reference: full texture. */
             1016,1016,0,0,    8,   8,0,0,    8,   8,0,0, 1016,   8,0,0,    8,1016,0,0, 1016,1016,0,0,
         },
     },
