@@ -82,7 +82,10 @@ static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
         .pass = CTRPS2_P2TRK_PASS_OPAQUE,
         .flags = CTRPS2_P2TRK_MATERIAL_TEXTURED,
         .state_key = 0,
-        .reserved = {0, 0},
+        .texture_width = 64,
+        .texture_height = 64,
+        .reserved0 = 0,
+        .reserved1 = 0,
     },
     .clusters = {
         {
