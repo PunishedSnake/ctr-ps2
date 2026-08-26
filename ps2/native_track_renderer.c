@@ -9,18 +9,6 @@ static struct CTRPS2P2TrkView s_track;
 static int s_initialized;
 static int s_inflight;
 
-/*
- * N1b/N1c prototype camera/projection contract.
- * Column-major matrix consumed directly by the VU1 microprogram:
- *   clip.x =  1.15 * x
- *   clip.y = -1.45 * y
- *   clip.z =  1
- *   clip.w =  z
- *
- * After perspective division depth is 1/z. The geometry header maps that into
- * a positive 16-bit reversed depth range so GS GEQUAL means "nearer wins".
- * This remains a fixed fixture camera, not the final CTR camera transform.
- */
 static const float s_nativeObjectToScreen[16] __attribute__((aligned(64))) = {
     1.15f,  0.00f, 0.0f, 0.0f,
     0.00f, -1.45f, 0.0f, 0.0f,
@@ -49,11 +37,13 @@ static int CTRPS2_NativeTrackRendererBuildBatch(
     batch->positions_qwords = view.cluster->positions_qwords;
     batch->colors_rgba8 = view.colors_rgba8;
     batch->colors_qwords = view.cluster->colors_qwords;
-    batch->uvs_v4_16 = view.uvs_v4_16;
+    batch->uvs_16 = view.uvs_v4_16;
     batch->uvs_qwords = view.cluster->uvs_qwords;
     batch->vertex_count = view.cluster->vertex_count;
     batch->gs_primitive = view.cluster->gs_primitive;
     batch->textured = 1;
+    batch->uv_v2_16 =
+        (view.cluster->flags & CTRPS2_P2TRK_CLUSTER_UV_V2_16) ? 1u : 0u;
     return 1;
 }
 
@@ -71,11 +61,6 @@ int CTRPS2_NativeTrackRendererInit(const void *track_data, u32 track_bytes)
     if (!CTRPS2_NativeGeometrySetObjectToScreen(s_nativeObjectToScreen))
         return 0;
 
-    /*
-     * N1c builds the complete immutable opaque command chain once. Subsequent
-     * frame submits do not allocate packet2 objects, gather vertices or rebuild
-     * per-cluster VIF commands.
-     */
     if (!CTRPS2_NativeGeometryPassBegin(s_track.header->cluster_count))
         return 0;
 
@@ -125,10 +110,6 @@ int CTRPS2_NativeTrackRendererDraw(void)
     if (!CTRPS2_NativeTrackRendererSubmit())
         return 0;
 
-    /*
-     * The static proof has no useful EE work after submission yet. The split API
-     * deliberately keeps the wait movable for the real frame scheduler.
-     */
     CTRPS2_NativeTrackRendererWait();
     return 1;
 }
