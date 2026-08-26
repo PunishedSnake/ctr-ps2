@@ -14,7 +14,6 @@
 
 #define CTRPS2_NATIVE_GEOMETRY_PROGRAM_ADDR       64
 #define CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS      7
-#define CTRPS2_NATIVE_GEOMETRY_VIF_QWORDS         96
 #define CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW   7
 #define CTRPS2_NATIVE_GEOMETRY_OUTPUT_DEST_QW     96
 #define CTRPS2_NATIVE_GEOMETRY_PACKED_NREG        3
@@ -22,15 +21,23 @@
     (((u64)GIF_REG_ST) | ((u64)GIF_REG_RGBAQ << 4) | ((u64)GIF_REG_XYZ2 << 8))
 
 /*
- * N1 keeps the validated three-stream input ABI:
- *
+ * Conservative packet capacity for one batch inside the persistent N1c VIF1
+ * chain. This includes the inline 7-QW header, VIF state CNT tags, three REF
+ * streams and the FLUSH+MSCAL launch tag. The final packet size is checked by
+ * packet2's own cursor through this preallocated buffer; later profiling can
+ * replace this deliberately roomy bound with a tighter arena planner.
+ */
+#define CTRPS2_NATIVE_GEOMETRY_PACKET_BASE_QWORDS       8u
+#define CTRPS2_NATIVE_GEOMETRY_PACKET_QWORDS_PER_BATCH 48u
+
+/*
  * Input in one TOP/TOPS region:
  *   0              screen scale + vertex count
  *   1              screen offset
  *   2              primitive GIFtag
- *   3              ST normalization + Q seed
- *   4              reserved
- *   5..6           FINISH packet
+ *   3              ST normalization
+ *   4              pass control (w = emit final GS FINISH)
+ *   5..6           FINISH packet payload, consumed only by final batch
  *   7..7+N          V3-16 positions
  *   next N          RGBA8
  *   next N          V4-16 source texcoords (12.4 texel U/V)
@@ -44,23 +51,15 @@
 #define CTRPS2_NATIVE_TEXTURE_HEIGHT  64.0f
 
 /*
- * N1b fixture depth contract.
- *
- * The prototype camera emits clip.z=1 and clip.w=view_z, so post-divide depth
- * is 1/view_z. GS opaque Z uses GEQUAL, therefore smaller view_z must produce
- * a larger stored value. FTOI4 multiplies by 16, hence a scale of
- * (65535 * near_z / 16) maps view_z=near_z to 0xffff for the 16-bit Z buffer.
- * The fixture never crosses near_z; the production camera will derive this
- * from its real near/far contract rather than these fixed constants.
+ * N1b/N1c fixture depth contract.
+ * clip.z=1, clip.w=view_z => post-divide depth=1/view_z.
+ * GEQUAL therefore keeps the nearer sample. FTOI4 contributes the final x16.
  */
 #define CTRPS2_NATIVE_DEPTH_NEAR_Z  8.0f
 #define CTRPS2_NATIVE_DEPTH_MAX     65535.0f
 
 extern u32 CTRPS2_VU1_NativeTrackStart __attribute__((section(".vudata")));
 extern u32 CTRPS2_VU1_NativeTrackEnd __attribute__((section(".vudata")));
-
-static qword_t s_header[CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS]
-    __attribute__((aligned(64)));
 
 static float s_objectToScreen[16] __attribute__((aligned(64))) = {
      1.0f,  0.0f, 0.0f, 0.0f,
@@ -70,8 +69,10 @@ static float s_objectToScreen[16] __attribute__((aligned(64))) = {
 };
 
 static packet2_t *s_vifPacket;
-static struct CTRPS2NativeGeometryBatch s_batch;
+static u32 s_expectedBatches;
+static u32 s_appendedBatches;
 static int s_initialized;
+static int s_passReady;
 static int s_submitted;
 
 static void CTRPS2_NativeGeometryWriteFloat(qword_t *qword, int component, float value)
@@ -186,50 +187,45 @@ static int CTRPS2_NativeGeometryBatchValid(
     return 1;
 }
 
-static void CTRPS2_NativeGeometryBuildHeader(void)
+static void CTRPS2_NativeGeometryBuildHeader(
+    qword_t header[CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS],
+    const struct CTRPS2NativeGeometryBatch *batch,
+    int emit_finish)
 {
     u64 prim;
     const float depth_scale =
         (CTRPS2_NATIVE_DEPTH_MAX * CTRPS2_NATIVE_DEPTH_NEAR_Z) / 16.0f;
 
-    memset(s_header, 0, sizeof(s_header));
+    memset(header, 0, sizeof(qword_t) * CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS);
 
     CTRPS2_NativeGeometryWriteFloat(
-        &s_header[0], 0, CTRPS2_FRAME_WIDTH * 0.5f);
+        &header[0], 0, CTRPS2_FRAME_WIDTH * 0.5f);
     CTRPS2_NativeGeometryWriteFloat(
-        &s_header[0], 1, CTRPS2_FRAME_HEIGHT * 0.5f);
-    CTRPS2_NativeGeometryWriteFloat(&s_header[0], 2, depth_scale);
-    s_header[0].sw[3] = s_batch.vertex_count;
+        &header[0], 1, CTRPS2_FRAME_HEIGHT * 0.5f);
+    CTRPS2_NativeGeometryWriteFloat(&header[0], 2, depth_scale);
+    header[0].sw[3] = batch->vertex_count;
 
     CTRPS2_NativeGeometryWriteFloat(
-        &s_header[1],
+        &header[1],
         0,
         (float)(CTRPS2_GS_ORIGIN_X + (CTRPS2_FRAME_WIDTH / 2)));
     CTRPS2_NativeGeometryWriteFloat(
-        &s_header[1],
+        &header[1],
         1,
         (float)(CTRPS2_GS_ORIGIN_Y + (CTRPS2_FRAME_HEIGHT / 2)));
-    CTRPS2_NativeGeometryWriteFloat(&s_header[1], 2, 0.0f);
+    CTRPS2_NativeGeometryWriteFloat(&header[1], 2, 0.0f);
 
-    /*
-     * p2trk currently stores U/V in 12.4 texel space because that is the
-     * already validated compact transport representation. STQ expects
-     * normalized texture coordinates, so VU1 applies these per-material scale
-     * factors after ITOF4. Slot 0 is 64x64 in N1. Later p2tex material data
-     * supplies these values instead of compile-time constants.
-     */
     CTRPS2_NativeGeometryWriteFloat(
-        &s_header[3], 0, 1.0f / CTRPS2_NATIVE_TEXTURE_WIDTH);
+        &header[3], 0, 1.0f / CTRPS2_NATIVE_TEXTURE_WIDTH);
     CTRPS2_NativeGeometryWriteFloat(
-        &s_header[3], 1, 1.0f / CTRPS2_NATIVE_TEXTURE_HEIGHT);
-    CTRPS2_NativeGeometryWriteFloat(&s_header[3], 2, 1.0f);
+        &header[3], 1, 1.0f / CTRPS2_NATIVE_TEXTURE_HEIGHT);
+    CTRPS2_NativeGeometryWriteFloat(&header[3], 2, 1.0f);
 
-    /*
-     * POTWIERDZONE/current PS2SDK: FST=0 selects floating STQ texture mapping.
-     * The VU program emits ST before RGBAQ so GS Q state belongs to this vertex.
-     */
+    /* VU1 reads header[4].w to decide whether this batch owns the pass fence. */
+    header[4].sw[3] = emit_finish ? 1u : 0u;
+
     prim = GS_SET_PRIM(
-        s_batch.gs_primitive,
+        batch->gs_primitive,
         PRIM_SHADE_GOURAUD,
         DRAW_ENABLE,
         DRAW_DISABLE,
@@ -239,22 +235,43 @@ static void CTRPS2_NativeGeometryBuildHeader(void)
         0,
         PRIM_UNFIXED);
 
-    s_header[2].dw[0] = VU_GS_GIFTAG(
-        s_batch.vertex_count,
-        0,
+    /*
+     * Non-final XGKICK packets end at the primitive GIFtag. The final batch
+     * keeps EOP clear so the appended FINISH packet becomes the only pass fence.
+     */
+    header[2].dw[0] = VU_GS_GIFTAG(
+        batch->vertex_count,
+        emit_finish ? 0 : 1,
         1,
         prim,
         GIF_FLG_PACKED,
         CTRPS2_NATIVE_GEOMETRY_PACKED_NREG);
-    s_header[2].dw[1] = CTRPS2_NATIVE_GEOMETRY_PACKED_REGLIST;
+    header[2].dw[1] = CTRPS2_NATIVE_GEOMETRY_PACKED_REGLIST;
 
-    s_header[5].dw[0] = GIF_SET_TAG(1, 1, 0, 0, GIF_FLG_PACKED, 1);
-    s_header[5].dw[1] = GIF_REG_AD;
-    s_header[6].dw[0] = 1;
-    s_header[6].dw[1] = GS_REG_FINISH;
+    header[5].dw[0] = GIF_SET_TAG(1, 1, 0, 0, GIF_FLG_PACKED, 1);
+    header[5].dw[1] = GIF_REG_AD;
+    header[6].dw[0] = 1;
+    header[6].dw[1] = GS_REG_FINISH;
 }
 
-static void CTRPS2_NativeGeometryAddPositionUnpack(packet2_t *packet)
+static void CTRPS2_NativeGeometryAddInlineHeader(
+    packet2_t *packet,
+    const struct CTRPS2NativeGeometryBatch *batch,
+    int emit_finish)
+{
+    qword_t header[CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS]
+        __attribute__((aligned(16)));
+
+    CTRPS2_NativeGeometryBuildHeader(header, batch, emit_finish);
+
+    packet2_utils_vu_open_unpack(packet, 0, 1);
+    packet2_add_data(packet, header, CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS);
+    packet2_utils_vu_close_unpack(packet);
+}
+
+static void CTRPS2_NativeGeometryAddPositionUnpack(
+    packet2_t *packet,
+    const struct CTRPS2NativeGeometryBatch *batch)
 {
     static const u32 row[4] = {0, 0, 0, 0x3f800000u};
     Mask mask;
@@ -276,8 +293,8 @@ static void CTRPS2_NativeGeometryAddPositionUnpack(packet2_t *packet)
 
     packet2_chain_ref(
         packet,
-        (void *)s_batch.positions_v3_16,
-        s_batch.positions_qwords,
+        (void *)batch->positions_v3_16,
+        batch->positions_qwords,
         0,
         0,
         0);
@@ -290,15 +307,17 @@ static void CTRPS2_NativeGeometryAddPositionUnpack(packet2_t *packet)
         1,
         0,
         0);
-    packet2_vif_close_unpack_manual(packet, s_batch.vertex_count);
+    packet2_vif_close_unpack_manual(packet, batch->vertex_count);
 }
 
-static void CTRPS2_NativeGeometryAddColorUnpack(packet2_t *packet)
+static void CTRPS2_NativeGeometryAddColorUnpack(
+    packet2_t *packet,
+    const struct CTRPS2NativeGeometryBatch *batch)
 {
     packet2_chain_ref(
         packet,
-        (void *)s_batch.colors_rgba8,
-        s_batch.colors_qwords,
+        (void *)batch->colors_rgba8,
+        batch->colors_qwords,
         0,
         0,
         0);
@@ -306,20 +325,22 @@ static void CTRPS2_NativeGeometryAddColorUnpack(packet2_t *packet)
     packet2_vif_open_unpack(
         packet,
         P2_UNPACK_V4_8,
-        CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW + s_batch.vertex_count,
+        CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW + batch->vertex_count,
         1,
         0,
         1,
         0);
-    packet2_vif_close_unpack_manual(packet, s_batch.vertex_count);
+    packet2_vif_close_unpack_manual(packet, batch->vertex_count);
 }
 
-static void CTRPS2_NativeGeometryAddUVUnpack(packet2_t *packet)
+static void CTRPS2_NativeGeometryAddUVUnpack(
+    packet2_t *packet,
+    const struct CTRPS2NativeGeometryBatch *batch)
 {
     packet2_chain_ref(
         packet,
-        (void *)s_batch.uvs_v4_16,
-        s_batch.uvs_qwords,
+        (void *)batch->uvs_v4_16,
+        batch->uvs_qwords,
         0,
         0,
         0);
@@ -328,45 +349,12 @@ static void CTRPS2_NativeGeometryAddUVUnpack(packet2_t *packet)
         packet,
         P2_UNPACK_V4_16,
         CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW +
-            ((u32)s_batch.vertex_count * 2u),
+            ((u32)batch->vertex_count * 2u),
         1,
         0,
         1,
         0);
-    packet2_vif_close_unpack_manual(packet, s_batch.vertex_count);
-}
-
-static int CTRPS2_NativeGeometryBuildPacket(void)
-{
-    s_vifPacket = packet2_create(
-        CTRPS2_NATIVE_GEOMETRY_VIF_QWORDS,
-        P2_TYPE_NORMAL,
-        P2_MODE_CHAIN,
-        1);
-    if (s_vifPacket == NULL)
-        return 0;
-
-    packet2_utils_vu_add_unpack_data(
-        s_vifPacket,
-        0,
-        s_header,
-        CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS,
-        1);
-
-    CTRPS2_NativeGeometryAddPositionUnpack(s_vifPacket);
-    CTRPS2_NativeGeometryAddColorUnpack(s_vifPacket);
-    CTRPS2_NativeGeometryAddUVUnpack(s_vifPacket);
-
-    /*
-     * CURRENT IMPLEMENTATION correctness baseline. The helper's FLUSH+MSCAL
-     * remains until N1c builds a multi-cluster chain and measures the narrower
-     * dependency schedule on real hardware.
-     */
-    packet2_utils_vu_add_start_program(
-        s_vifPacket,
-        CTRPS2_NATIVE_GEOMETRY_PROGRAM_ADDR);
-    packet2_utils_vu_add_end_tag(s_vifPacket);
-    return 1;
+    packet2_vif_close_unpack_manual(packet, batch->vertex_count);
 }
 
 int CTRPS2_NativeGeometryInit(void)
@@ -377,6 +365,7 @@ int CTRPS2_NativeGeometryInit(void)
         return 0;
 
     s_initialized = 1;
+    s_passReady = 0;
     s_submitted = 0;
     return 1;
 }
@@ -392,16 +381,20 @@ int CTRPS2_NativeGeometrySetObjectToScreen(const float matrix[16])
     return CTRPS2_NativeGeometryUploadMatrix();
 }
 
-int CTRPS2_NativeGeometryPrepare(
-    const struct CTRPS2NativeGeometryBatch *batch)
+int CTRPS2_NativeGeometryPassBegin(u32 batch_count)
 {
-    if (!s_initialized || s_submitted)
-        return 0;
-    if (!CTRPS2_NativeGeometryBatchValid(batch))
+    u32 packet_qwords;
+
+    if (!s_initialized || s_submitted || batch_count == 0)
         return 0;
 
-    s_batch = *batch;
-    CTRPS2_NativeGeometryBuildHeader();
+    if (batch_count >
+        ((0xffffu - CTRPS2_NATIVE_GEOMETRY_PACKET_BASE_QWORDS) /
+         CTRPS2_NATIVE_GEOMETRY_PACKET_QWORDS_PER_BATCH))
+        return 0;
+
+    packet_qwords = CTRPS2_NATIVE_GEOMETRY_PACKET_BASE_QWORDS +
+                    (batch_count * CTRPS2_NATIVE_GEOMETRY_PACKET_QWORDS_PER_BATCH);
 
     if (s_vifPacket != NULL)
     {
@@ -409,19 +402,83 @@ int CTRPS2_NativeGeometryPrepare(
         s_vifPacket = NULL;
     }
 
-    return CTRPS2_NativeGeometryBuildPacket();
+    s_vifPacket = packet2_create(
+        (u16)packet_qwords,
+        P2_TYPE_NORMAL,
+        P2_MODE_CHAIN,
+        1);
+    if (s_vifPacket == NULL)
+        return 0;
+
+    s_expectedBatches = batch_count;
+    s_appendedBatches = 0;
+    s_passReady = 0;
+    return 1;
 }
 
-void CTRPS2_NativeGeometrySubmit(void)
+int CTRPS2_NativeGeometryPassAppend(
+    const struct CTRPS2NativeGeometryBatch *batch)
 {
-    if (!s_initialized || s_vifPacket == NULL || s_submitted)
-        return;
+    int emit_finish;
 
+    if (s_vifPacket == NULL || s_passReady || s_submitted)
+        return 0;
+    if (s_appendedBatches >= s_expectedBatches)
+        return 0;
+    if (!CTRPS2_NativeGeometryBatchValid(batch))
+        return 0;
+
+    emit_finish = ((s_appendedBatches + 1u) == s_expectedBatches);
+
+    CTRPS2_NativeGeometryAddInlineHeader(s_vifPacket, batch, emit_finish);
+    CTRPS2_NativeGeometryAddPositionUnpack(s_vifPacket, batch);
+    CTRPS2_NativeGeometryAddColorUnpack(s_vifPacket, batch);
+    CTRPS2_NativeGeometryAddUVUnpack(s_vifPacket, batch);
+
+    /*
+     * CURRENT IMPLEMENTATION / correctness baseline:
+     * packet2's helper emits FLUSH+MSCAL for each batch. This still allows VIF1
+     * to fill the alternate TOPS input buffer while VU1 consumes the current
+     * TOP buffer, but it deliberately retires the previous VU/GIF dependency
+     * before reusing a buffer two batches later. N1d will A/B narrower barriers
+     * only after this ownership model is reproduced on real hardware.
+     */
+    packet2_utils_vu_add_start_program(
+        s_vifPacket,
+        CTRPS2_NATIVE_GEOMETRY_PROGRAM_ADDR);
+
+    s_appendedBatches++;
+    return 1;
+}
+
+int CTRPS2_NativeGeometryPassEnd(void)
+{
+    if (s_vifPacket == NULL || s_submitted)
+        return 0;
+    if (s_appendedBatches != s_expectedBatches)
+        return 0;
+
+    packet2_utils_vu_add_end_tag(s_vifPacket);
+    s_passReady = 1;
+    return 1;
+}
+
+int CTRPS2_NativeGeometryPassSubmit(void)
+{
+    if (!s_initialized || !s_passReady || s_vifPacket == NULL || s_submitted)
+        return 0;
+
+    /*
+     * The persistent chain REFers into immutable p2trk streams. Broad cache
+     * flush remains the current PS2SDK correctness baseline for source-chained
+     * REF data; immutable asset cache policy is a later measured optimization.
+     */
     dma_channel_send_packet2(s_vifPacket, DMA_CHANNEL_VIF1, 1);
     s_submitted = 1;
+    return 1;
 }
 
-void CTRPS2_NativeGeometryWait(void)
+void CTRPS2_NativeGeometryPassWait(void)
 {
     if (!s_submitted)
         return;
