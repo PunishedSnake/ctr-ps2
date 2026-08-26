@@ -22,8 +22,7 @@
     (((u64)GIF_REG_ST) | ((u64)GIF_REG_RGBAQ << 4) | ((u64)GIF_REG_XYZ2 << 8))
 
 /*
- * N1a deliberately keeps the validated three-stream input ABI so the only
- * semantic renderer change is UV/FST -> STQ perspective correction.
+ * N1 keeps the validated three-stream input ABI:
  *
  * Input in one TOP/TOPS region:
  *   0              screen scale + vertex count
@@ -44,6 +43,19 @@
 #define CTRPS2_NATIVE_TEXTURE_WIDTH   64.0f
 #define CTRPS2_NATIVE_TEXTURE_HEIGHT  64.0f
 
+/*
+ * N1b fixture depth contract.
+ *
+ * The prototype camera emits clip.z=1 and clip.w=view_z, so post-divide depth
+ * is 1/view_z. GS opaque Z uses GEQUAL, therefore smaller view_z must produce
+ * a larger stored value. FTOI4 multiplies by 16, hence a scale of
+ * (65535 * near_z / 16) maps view_z=near_z to 0xffff for the 16-bit Z buffer.
+ * The fixture never crosses near_z; the production camera will derive this
+ * from its real near/far contract rather than these fixed constants.
+ */
+#define CTRPS2_NATIVE_DEPTH_NEAR_Z  8.0f
+#define CTRPS2_NATIVE_DEPTH_MAX     65535.0f
+
 extern u32 CTRPS2_VU1_NativeTrackStart __attribute__((section(".vudata")));
 extern u32 CTRPS2_VU1_NativeTrackEnd __attribute__((section(".vudata")));
 
@@ -53,8 +65,8 @@ static qword_t s_header[CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS]
 static float s_objectToScreen[16] __attribute__((aligned(64))) = {
      1.0f,  0.0f, 0.0f, 0.0f,
      0.0f, -1.0f, 0.0f, 0.0f,
-     0.0f,  0.0f, 1.0f, 0.0f,
      0.0f,  0.0f, 0.0f, 1.0f,
+     0.0f,  0.0f, 1.0f, 0.0f,
 };
 
 static packet2_t *s_vifPacket;
@@ -177,7 +189,8 @@ static int CTRPS2_NativeGeometryBatchValid(
 static void CTRPS2_NativeGeometryBuildHeader(void)
 {
     u64 prim;
-    const float z_scale = ((float)0x00ffffffu) / 32.0f;
+    const float depth_scale =
+        (CTRPS2_NATIVE_DEPTH_MAX * CTRPS2_NATIVE_DEPTH_NEAR_Z) / 16.0f;
 
     memset(s_header, 0, sizeof(s_header));
 
@@ -185,7 +198,7 @@ static void CTRPS2_NativeGeometryBuildHeader(void)
         &s_header[0], 0, CTRPS2_FRAME_WIDTH * 0.5f);
     CTRPS2_NativeGeometryWriteFloat(
         &s_header[0], 1, CTRPS2_FRAME_HEIGHT * 0.5f);
-    CTRPS2_NativeGeometryWriteFloat(&s_header[0], 2, z_scale);
+    CTRPS2_NativeGeometryWriteFloat(&s_header[0], 2, depth_scale);
     s_header[0].sw[3] = s_batch.vertex_count;
 
     CTRPS2_NativeGeometryWriteFloat(
@@ -196,13 +209,13 @@ static void CTRPS2_NativeGeometryBuildHeader(void)
         &s_header[1],
         1,
         (float)(CTRPS2_GS_ORIGIN_Y + (CTRPS2_FRAME_HEIGHT / 2)));
-    CTRPS2_NativeGeometryWriteFloat(&s_header[1], 2, z_scale);
+    CTRPS2_NativeGeometryWriteFloat(&s_header[1], 2, 0.0f);
 
     /*
      * p2trk currently stores U/V in 12.4 texel space because that is the
      * already validated compact transport representation. STQ expects
      * normalized texture coordinates, so VU1 applies these per-material scale
-     * factors after ITOF4. Slot 0 is 64x64 in N1a. Later p2tex material data
+     * factors after ITOF4. Slot 0 is 64x64 in N1. Later p2tex material data
      * supplies these values instead of compile-time constants.
      */
     CTRPS2_NativeGeometryWriteFloat(
