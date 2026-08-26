@@ -148,13 +148,15 @@ static int CTRPS2_NativeRendererInitGs(void)
     s_frame.address = (u32)frame_address;
 
     /*
-     * Native N0 keeps depth storage but ALLPASS until the first multi-cluster
-     * camera test has a deliberate Z clear/test contract. This removes one
-     * variable from the PS1-free bring-up without making Z-buffer omission a
-     * renderer design decision.
+     * N1b depth contract. The GS exposes GREATER/GEQUAL rather than the common
+     * desktop LESS convention, so VU1 maps nearer geometry to larger positive
+     * Z values. Clear writes Z=0, then opaque geometry uses GEQUAL and writes Z.
+     *
+     * POTWIERDZONE/current PS2SDK: draw_clear() emits Z=0 while tests are put
+     * into ALLPASS, and draw_enable_tests() restores zbuffer.method.
      */
     s_zbuffer.enable = DRAW_ENABLE;
-    s_zbuffer.method = ZTEST_METHOD_ALLPASS;
+    s_zbuffer.method = ZTEST_METHOD_GREATER_EQUAL;
     s_zbuffer.mask = 0;
     s_zbuffer.zsm = GS_ZBUF_16S;
     z_address = graph_vram_allocate(
