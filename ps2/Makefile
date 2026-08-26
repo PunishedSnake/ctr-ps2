@@ -1,5 +1,7 @@
 EE_BIN = ctr_ps2_renderer.elf
-EE_OBJS = vu1_geometry.o main.o renderer_ps2.o geometry_bench.o ctr_level_bridge.o ctr_texture_source.o ctr_texture_pack.o
+EE_OBJS = vu1_geometry.o main.o \
+	native_renderer.o native_texture_fixture.o \
+	native_geometry.o p2trk.o native_track_fixture.o native_track_renderer.o
 EE_LIBS = -ldraw -lgraph -lpacket2 -ldma
 EE_DVP = dvp-as
 
