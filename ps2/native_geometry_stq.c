@@ -13,8 +13,8 @@
 #include <string.h>
 
 #define CTRPS2_NATIVE_GEOMETRY_PROGRAM_ADDR       64
-#define CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS      7
-#define CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW   7
+#define CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS      4
+#define CTRPS2_NATIVE_GEOMETRY_POSITION_DEST_QW   4
 #define CTRPS2_NATIVE_GEOMETRY_OUTPUT_DEST_QW     96
 #define CTRPS2_NATIVE_GEOMETRY_PACKED_NREG        3
 #define CTRPS2_NATIVE_GEOMETRY_PACKED_REGLIST \
@@ -36,12 +36,16 @@
 extern u32 CTRPS2_VU1_NativeTrackStart __attribute__((section(".vudata")));
 extern u32 CTRPS2_VU1_NativeTrackEnd __attribute__((section(".vudata")));
 
+/* Absolute VU memory 0..3. Updated when the camera changes. */
 static float s_objectToScreen[16] __attribute__((aligned(64))) = {
      1.0f,  0.0f, 0.0f, 0.0f,
      0.0f, -1.0f, 0.0f, 0.0f,
      0.0f,  0.0f, 0.0f, 1.0f,
      0.0f,  0.0f, 1.0f, 0.0f,
 };
+
+/* Absolute VU memory 4..7. Uploaded once; identical for every cluster. */
+static qword_t s_commonState[4] __attribute__((aligned(64)));
 
 static packet2_t *s_vifPacket;
 static u32 s_expectedBatches;
@@ -100,6 +104,57 @@ static int CTRPS2_NativeGeometryUploadMatrix(void)
         packet,
         0,
         (void *)s_objectToScreen,
+        4,
+        0);
+    packet2_utils_vu_add_end_tag(packet);
+
+    dma_channel_send_packet2(packet, DMA_CHANNEL_VIF1, 1);
+    dma_channel_wait(DMA_CHANNEL_VIF1, 0);
+    packet2_free(packet);
+    return 1;
+}
+
+static void CTRPS2_NativeGeometryBuildCommonState(void)
+{
+    const float depth_scale =
+        (CTRPS2_NATIVE_DEPTH_MAX * CTRPS2_NATIVE_DEPTH_NEAR_Z) / 16.0f;
+
+    memset(s_commonState, 0, sizeof(s_commonState));
+
+    CTRPS2_NativeGeometryWriteFloat(
+        &s_commonState[0], 0, CTRPS2_FRAME_WIDTH * 0.5f);
+    CTRPS2_NativeGeometryWriteFloat(
+        &s_commonState[0], 1, CTRPS2_FRAME_HEIGHT * 0.5f);
+    CTRPS2_NativeGeometryWriteFloat(&s_commonState[0], 2, depth_scale);
+
+    CTRPS2_NativeGeometryWriteFloat(
+        &s_commonState[1], 0,
+        (float)(CTRPS2_GS_ORIGIN_X + (CTRPS2_FRAME_WIDTH / 2)));
+    CTRPS2_NativeGeometryWriteFloat(
+        &s_commonState[1], 1,
+        (float)(CTRPS2_GS_ORIGIN_Y + (CTRPS2_FRAME_HEIGHT / 2)));
+    CTRPS2_NativeGeometryWriteFloat(&s_commonState[1], 2, 0.0f);
+
+    s_commonState[2].dw[0] = GIF_SET_TAG(1, 1, 0, 0, GIF_FLG_PACKED, 1);
+    s_commonState[2].dw[1] = GIF_REG_AD;
+    s_commonState[3].dw[0] = 1;
+    s_commonState[3].dw[1] = GS_REG_FINISH;
+}
+
+static int CTRPS2_NativeGeometryUploadCommonState(void)
+{
+    packet2_t *packet;
+
+    CTRPS2_NativeGeometryBuildCommonState();
+
+    packet = packet2_create(16, P2_TYPE_NORMAL, P2_MODE_CHAIN, 1);
+    if (packet == NULL)
+        return 0;
+
+    packet2_utils_vu_add_unpack_data(
+        packet,
+        4,
+        s_commonState,
         4,
         0);
     packet2_utils_vu_add_end_tag(packet);
@@ -172,38 +227,11 @@ static void CTRPS2_NativeGeometryBuildHeader(
     int emit_finish)
 {
     u64 prim;
-    const float depth_scale =
-        (CTRPS2_NATIVE_DEPTH_MAX * CTRPS2_NATIVE_DEPTH_NEAR_Z) / 16.0f;
 
     memset(header, 0, sizeof(qword_t) * CTRPS2_NATIVE_GEOMETRY_HEADER_QWORDS);
 
-    CTRPS2_NativeGeometryWriteFloat(
-        &header[0], 0, CTRPS2_FRAME_WIDTH * 0.5f);
-    CTRPS2_NativeGeometryWriteFloat(
-        &header[0], 1, CTRPS2_FRAME_HEIGHT * 0.5f);
-    CTRPS2_NativeGeometryWriteFloat(&header[0], 2, depth_scale);
+    /* Only the count remains from the old per-cluster screen-scale qword. */
     header[0].sw[3] = batch->vertex_count;
-
-    CTRPS2_NativeGeometryWriteFloat(
-        &header[1], 0,
-        (float)(CTRPS2_GS_ORIGIN_X + (CTRPS2_FRAME_WIDTH / 2)));
-    CTRPS2_NativeGeometryWriteFloat(
-        &header[1], 1,
-        (float)(CTRPS2_GS_ORIGIN_Y + (CTRPS2_FRAME_HEIGHT / 2)));
-    CTRPS2_NativeGeometryWriteFloat(&header[1], 2, 0.0f);
-
-    /*
-     * p2trk v2 owns the logical texture dimensions. The reciprocal is computed
-     * once while the persistent pass packet is built, not per frame and never
-     * per vertex. The asset compiler remains free to choose a wider GS TBW.
-     */
-    CTRPS2_NativeGeometryWriteFloat(
-        &header[3], 0, 1.0f / (float)batch->texture_width);
-    CTRPS2_NativeGeometryWriteFloat(
-        &header[3], 1, 1.0f / (float)batch->texture_height);
-    CTRPS2_NativeGeometryWriteFloat(&header[3], 2, 1.0f);
-
-    header[4].sw[3] = emit_finish ? 1u : 0u;
 
     prim = GS_SET_PRIM(
         batch->gs_primitive,
@@ -216,19 +244,23 @@ static void CTRPS2_NativeGeometryBuildHeader(
         0,
         PRIM_UNFIXED);
 
-    header[2].dw[0] = VU_GS_GIFTAG(
+    header[1].dw[0] = VU_GS_GIFTAG(
         batch->vertex_count,
         emit_finish ? 0 : 1,
         1,
         prim,
         GIF_FLG_PACKED,
         CTRPS2_NATIVE_GEOMETRY_PACKED_NREG);
-    header[2].dw[1] = CTRPS2_NATIVE_GEOMETRY_PACKED_REGLIST;
+    header[1].dw[1] = CTRPS2_NATIVE_GEOMETRY_PACKED_REGLIST;
 
-    header[5].dw[0] = GIF_SET_TAG(1, 1, 0, 0, GIF_FLG_PACKED, 1);
-    header[5].dw[1] = GIF_REG_AD;
-    header[6].dw[0] = 1;
-    header[6].dw[1] = GS_REG_FINISH;
+    /* p2trk v2 material dimensions become per-material ST constants once. */
+    CTRPS2_NativeGeometryWriteFloat(
+        &header[2], 0, 1.0f / (float)batch->texture_width);
+    CTRPS2_NativeGeometryWriteFloat(
+        &header[2], 1, 1.0f / (float)batch->texture_height);
+    CTRPS2_NativeGeometryWriteFloat(&header[2], 2, 1.0f);
+
+    header[3].sw[3] = emit_finish ? 1u : 0u;
 }
 
 static void CTRPS2_NativeGeometryAddInlineHeader(
@@ -326,11 +358,6 @@ static void CTRPS2_NativeGeometryAddLaunch(packet2_t *packet, u32 batch_index)
 {
     int need_path_flush;
 
-    /*
-     * Default N1c: FLUSH before every MSCAL.
-     * N1d A/B: MSCAL-only while the alternate output is disjoint, FLUSH when
-     * the same TOP/TOPS output region is reused two batches later.
-     */
     need_path_flush = !CTRPS2_NATIVE_VIF_REUSE_AWARE ||
                       (batch_index >= 2u && ((batch_index & 1u) == 0u));
 
@@ -344,6 +371,8 @@ static void CTRPS2_NativeGeometryAddLaunch(packet2_t *packet, u32 batch_index)
 int CTRPS2_NativeGeometryInit(void)
 {
     if (!CTRPS2_NativeGeometryUploadProgram())
+        return 0;
+    if (!CTRPS2_NativeGeometryUploadCommonState())
         return 0;
     if (!CTRPS2_NativeGeometryUploadMatrix())
         return 0;
