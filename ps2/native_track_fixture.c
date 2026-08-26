@@ -3,11 +3,16 @@
 
 #include <stddef.h>
 
-#define CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT 22u
+#define CTRPS2_NATIVE_FIXTURE_CLUSTER_COUNT 4u
+#define CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT  4u
 
+/*
+ * Four vertices are 24 source bytes for V3-16. Keep each cluster position
+ * stream padded to two qwords so every REF begins on a 16-byte boundary.
+ */
 struct CTRPS2NativeFixturePositions
 {
-    s16 data[CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT * 3u];
+    s16 data[16];
 } __attribute__((aligned(16)));
 
 struct CTRPS2NativeFixtureColors
@@ -24,10 +29,10 @@ struct CTRPS2NativeTrackFixtureBlob
 {
     struct CTRPS2P2TrkHeader header;
     struct CTRPS2P2TrkMaterial material;
-    struct CTRPS2P2TrkCluster cluster;
-    struct CTRPS2NativeFixturePositions positions;
-    struct CTRPS2NativeFixtureColors colors;
-    struct CTRPS2NativeFixtureUVs uvs;
+    struct CTRPS2P2TrkCluster clusters[CTRPS2_NATIVE_FIXTURE_CLUSTER_COUNT];
+    struct CTRPS2NativeFixturePositions positions[CTRPS2_NATIVE_FIXTURE_CLUSTER_COUNT];
+    struct CTRPS2NativeFixtureColors colors[CTRPS2_NATIVE_FIXTURE_CLUSTER_COUNT];
+    struct CTRPS2NativeFixtureUVs uvs[CTRPS2_NATIVE_FIXTURE_CLUSTER_COUNT];
 } __attribute__((aligned(64)));
 
 #define CTRPS2_NATIVE_POS_QWORDS \
@@ -37,6 +42,16 @@ struct CTRPS2NativeTrackFixtureBlob
 #define CTRPS2_NATIVE_UV_QWORDS \
     ((u16)(sizeof(struct CTRPS2NativeFixtureUVs) / 16u))
 
+#define CTRPS2_NATIVE_POS_OFFSET(i) \
+    (offsetof(struct CTRPS2NativeTrackFixtureBlob, positions) + \
+     ((u32)(i) * sizeof(struct CTRPS2NativeFixturePositions)))
+#define CTRPS2_NATIVE_COLOR_OFFSET(i) \
+    (offsetof(struct CTRPS2NativeTrackFixtureBlob, colors) + \
+     ((u32)(i) * sizeof(struct CTRPS2NativeFixtureColors)))
+#define CTRPS2_NATIVE_UV_OFFSET(i) \
+    (offsetof(struct CTRPS2NativeTrackFixtureBlob, uvs) + \
+     ((u32)(i) * sizeof(struct CTRPS2NativeFixtureUVs)))
+
 _Static_assert((sizeof(struct CTRPS2NativeFixturePositions) & 15u) == 0,
                "native position stream must be qword padded");
 _Static_assert((sizeof(struct CTRPS2NativeFixtureColors) & 15u) == 0,
@@ -44,29 +59,24 @@ _Static_assert((sizeof(struct CTRPS2NativeFixtureColors) & 15u) == 0,
 _Static_assert((sizeof(struct CTRPS2NativeFixtureUVs) & 15u) == 0,
                "native UV stream must be qword padded");
 _Static_assert((offsetof(struct CTRPS2NativeTrackFixtureBlob, positions) & 15u) == 0,
-               "native position stream offset must be DMA aligned");
+               "native position stream base must be DMA aligned");
 _Static_assert((offsetof(struct CTRPS2NativeTrackFixtureBlob, colors) & 15u) == 0,
-               "native color stream offset must be DMA aligned");
+               "native color stream base must be DMA aligned");
 _Static_assert((offsetof(struct CTRPS2NativeTrackFixtureBlob, uvs) & 15u) == 0,
-               "native UV stream offset must be DMA aligned");
+               "native UV stream base must be DMA aligned");
 
 /*
- * N1b adversarial depth fixture.
+ * N1c fixture: four independent p2trk clusters rather than one stitched strip.
  *
- * The stream is still one GS triangle strip with degenerate connectors, but the
- * first two faces deliberately overlap in projected screen space:
+ * Cluster 0: near, red quadrant.
+ * Cluster 1: farther, blue quadrant, emitted after cluster 0 and overlapping it.
+ * Cluster 2/3: independent full-texture perspective references.
  *
- *   face A: near, samples the red texture quadrant, emitted first
- *   face B: far,  samples the blue texture quadrant, emitted second
- *
- * B is scaled in object X/Y approximately with its larger Z so both faces cover
- * nearly the same pixels after perspective division. With Z disabled the later
- * blue face wins. With the N1b reversed-depth GEQUAL contract the earlier near
- * red face must remain visible. The lower two faces remain independent STQ /
- * perspective references.
- *
- * No QuadBlock/LevVertex data is constructed at runtime; this remains a compact
- * p2trk-owned VIF-ready transport fixture.
+ * This simultaneously validates:
+ *   - N1b GEQUAL reversed depth across cluster boundaries;
+ *   - VIF1 BASE/OFFSET TOP/TOPS alternation;
+ *   - four MSCAL/XGKICK jobs in one persistent DMA chain;
+ *   - one final pass-level GS FINISH.
  */
 static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
     __attribute__((aligned(64))) = {
@@ -76,9 +86,9 @@ static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
         .header_bytes = sizeof(struct CTRPS2P2TrkHeader),
         .total_bytes = sizeof(struct CTRPS2NativeTrackFixtureBlob),
         .material_count = 1,
-        .cluster_count = 1,
+        .cluster_count = CTRPS2_NATIVE_FIXTURE_CLUSTER_COUNT,
         .materials_offset = offsetof(struct CTRPS2NativeTrackFixtureBlob, material),
-        .clusters_offset = offsetof(struct CTRPS2NativeTrackFixtureBlob, cluster),
+        .clusters_offset = offsetof(struct CTRPS2NativeTrackFixtureBlob, clusters),
         .reserved = {0, 0},
     },
     .material = {
@@ -88,63 +98,137 @@ static const struct CTRPS2NativeTrackFixtureBlob s_nativeTrack
         .state_key = 0,
         .reserved = {0, 0},
     },
-    .cluster = {
-        .material_index = 0,
-        .vertex_count = CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT,
-        .gs_primitive = 0x04, /* GS_PRIM_TRIANGLE_STRIP */
-        .flags = 0,
-        .reserved0 = 0,
-        .positions_offset = offsetof(struct CTRPS2NativeTrackFixtureBlob, positions),
-        .positions_qwords = CTRPS2_NATIVE_POS_QWORDS,
-        .reserved1 = 0,
-        .colors_offset = offsetof(struct CTRPS2NativeTrackFixtureBlob, colors),
-        .colors_qwords = CTRPS2_NATIVE_COLOR_QWORDS,
-        .reserved2 = 0,
-        .uvs_offset = offsetof(struct CTRPS2NativeTrackFixtureBlob, uvs),
-        .uvs_qwords = CTRPS2_NATIVE_UV_QWORDS,
-        .reserved3 = 0,
-        .bounds_min = {-11, -7, 10},
-        .bounds_max = {6, 4, 20},
-        .reserved4 = 0,
+    .clusters = {
+        {
+            .material_index = 0,
+            .vertex_count = CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT,
+            .gs_primitive = 0x04,
+            .flags = 0,
+            .reserved0 = 0,
+            .positions_offset = CTRPS2_NATIVE_POS_OFFSET(0),
+            .positions_qwords = CTRPS2_NATIVE_POS_QWORDS,
+            .reserved1 = 0,
+            .colors_offset = CTRPS2_NATIVE_COLOR_OFFSET(0),
+            .colors_qwords = CTRPS2_NATIVE_COLOR_QWORDS,
+            .reserved2 = 0,
+            .uvs_offset = CTRPS2_NATIVE_UV_OFFSET(0),
+            .uvs_qwords = CTRPS2_NATIVE_UV_QWORDS,
+            .reserved3 = 0,
+            .bounds_min = {-6, -4, 10},
+            .bounds_max = {0, 0, 12},
+            .reserved4 = 0,
+        },
+        {
+            .material_index = 0,
+            .vertex_count = CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT,
+            .gs_primitive = 0x04,
+            .flags = 0,
+            .reserved0 = 0,
+            .positions_offset = CTRPS2_NATIVE_POS_OFFSET(1),
+            .positions_qwords = CTRPS2_NATIVE_POS_QWORDS,
+            .reserved1 = 0,
+            .colors_offset = CTRPS2_NATIVE_COLOR_OFFSET(1),
+            .colors_qwords = CTRPS2_NATIVE_COLOR_QWORDS,
+            .reserved2 = 0,
+            .uvs_offset = CTRPS2_NATIVE_UV_OFFSET(1),
+            .uvs_qwords = CTRPS2_NATIVE_UV_QWORDS,
+            .reserved3 = 0,
+            .bounds_min = {-11, -7, 18},
+            .bounds_max = {0, 0, 20},
+            .reserved4 = 0,
+        },
+        {
+            .material_index = 0,
+            .vertex_count = CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT,
+            .gs_primitive = 0x04,
+            .flags = 0,
+            .reserved0 = 0,
+            .positions_offset = CTRPS2_NATIVE_POS_OFFSET(2),
+            .positions_qwords = CTRPS2_NATIVE_POS_QWORDS,
+            .reserved1 = 0,
+            .colors_offset = CTRPS2_NATIVE_COLOR_OFFSET(2),
+            .colors_qwords = CTRPS2_NATIVE_COLOR_QWORDS,
+            .reserved2 = 0,
+            .uvs_offset = CTRPS2_NATIVE_UV_OFFSET(2),
+            .uvs_qwords = CTRPS2_NATIVE_UV_QWORDS,
+            .reserved3 = 0,
+            .bounds_min = {-6, 0, 12},
+            .bounds_max = {0, 4, 17},
+            .reserved4 = 0,
+        },
+        {
+            .material_index = 0,
+            .vertex_count = CTRPS2_NATIVE_FIXTURE_VERTEX_COUNT,
+            .gs_primitive = 0x04,
+            .flags = 0,
+            .reserved0 = 0,
+            .positions_offset = CTRPS2_NATIVE_POS_OFFSET(3),
+            .positions_qwords = CTRPS2_NATIVE_POS_QWORDS,
+            .reserved1 = 0,
+            .colors_offset = CTRPS2_NATIVE_COLOR_OFFSET(3),
+            .colors_qwords = CTRPS2_NATIVE_COLOR_QWORDS,
+            .reserved2 = 0,
+            .uvs_offset = CTRPS2_NATIVE_UV_OFFSET(3),
+            .uvs_qwords = CTRPS2_NATIVE_UV_QWORDS,
+            .reserved3 = 0,
+            .bounds_min = {0, 0, 12},
+            .bounds_max = {6, 4, 18},
+            .reserved4 = 0,
+        },
     },
     .positions = {
-        .data = {
-            /* Face A: near. */
+        { .data = {
             -6, -4, 10,   0, -4, 10,  -6,  0, 12,   0,  0, 12,
-            /* Degenerate A -> B and face B: farther, emitted after A. */
-             0,  0, 12, -11, -7, 18, -11, -7, 18,   0, -7, 18, -10,  0, 20,   0,  0, 20,
-            /* Degenerate B -> C and lower-left reference face. */
-             0,  0, 20,  -6,  0, 12,  -6,  0, 12,   0,  0, 12,  -5,  4, 17,   0,  4, 17,
-            /* Degenerate C -> D and lower-right reference face. */
-             0,  4, 17,   0,  0, 12,   0,  0, 12,   6,  0, 13,   0,  4, 17,   5,  4, 18,
-        },
+             0,  0,  0,   0,
+        } },
+        { .data = {
+            -11, -7, 18,   0, -7, 18,  -10,  0, 20,   0,  0, 20,
+               0,  0,  0,   0,
+        } },
+        { .data = {
+            -6,  0, 12,   0,  0, 12,  -5,  4, 17,   0,  4, 17,
+             0,  0,  0,   0,
+        } },
+        { .data = {
+             0,  0, 12,   6,  0, 13,   0,  4, 17,   5,  4, 18,
+             0,  0,  0,   0,
+        } },
     },
     .colors = {
-        .data = {
+        { .data = {
             0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
             0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
+        } },
+        { .data = {
             0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
             0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
+        } },
+        { .data = {
             0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
             0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
+        } },
+        { .data = {
             0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
             0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-            0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-            0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-            0x80,0x80,0x80,0x80, 0x80,0x80,0x80,0x80,
-        },
+        } },
     },
     .uvs = {
-        .data = {
-            /* Face A: top-left red quadrant, texel centers 0.5..31.5. */
-               8,   8,0,0,  504,   8,0,0,    8, 504,0,0,  504, 504,0,0,
-            /* Connector + face B: bottom-left blue quadrant. */
-             504, 504,0,0,    8, 520,0,0,    8, 520,0,0,  504, 520,0,0,    8,1016,0,0,  504,1016,0,0,
-            /* Connector + lower-left reference: full texture. */
-             504,1016,0,0,    8,   8,0,0,    8,   8,0,0, 1016,   8,0,0,    8,1016,0,0, 1016,1016,0,0,
-            /* Connector + lower-right reference: full texture. */
-            1016,1016,0,0,    8,   8,0,0,    8,   8,0,0, 1016,   8,0,0,    8,1016,0,0, 1016,1016,0,0,
-        },
+        { .data = {
+              8,   8,0,0,  504,   8,0,0,
+              8, 504,0,0,  504, 504,0,0,
+        } },
+        { .data = {
+              8, 520,0,0,  504, 520,0,0,
+              8,1016,0,0,  504,1016,0,0,
+        } },
+        { .data = {
+              8,   8,0,0, 1016,   8,0,0,
+              8,1016,0,0, 1016,1016,0,0,
+        } },
+        { .data = {
+              8,   8,0,0, 1016,   8,0,0,
+              8,1016,0,0, 1016,1016,0,0,
+        } },
     },
 };
 
